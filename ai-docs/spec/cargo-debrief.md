@@ -4,6 +4,8 @@ summary: RAG-based code retrieval tool — AST-aware chunking and hybrid search 
 features:
   - 🚧 Code Indexing
     - 🚧 AST-Aware Chunking
+    - 🚧 Cross-File Skeleton Assembly
+    - 🚧 Dual Text Representation
     - 🚧 Chunk Metadata
     - 🚧 Git-Based Incremental Re-Indexing
   - 🚧 Code Search
@@ -42,23 +44,98 @@ cargo debrief index [<path>]
 ### 🚧 AST-Aware Chunking
 
 Source files are parsed with tree-sitter into chunks at semantic
-boundaries rather than fixed token counts. Chunks are hierarchical:
+boundaries rather than fixed token counts. Two chunk types:
 
-| Level | Contents | Typical size |
-|-------|----------|-------------|
-| 0 — Skeleton | Struct/class/trait declarations, signatures only (no bodies) | ~10 lines |
-| 1 — Function | Individual function/method bodies | ~20–100 lines |
-| 2 — Reference | Declarations of types referenced by level-1 chunks | varies |
+**Type overview chunk** (per type, one per struct/enum/trait):
 
-When a search returns a level-1 (function) hit, the level-0 skeleton
-of the containing type is automatically attached, giving structural
-context without the full file.
+```rust
+// src/pool.rs
+struct ConnectionPool {
+    connections: Vec<Connection>,
+    max_size: usize,
+}
+
+impl ConnectionPool {
+    fn new(max_size: usize) -> Self;
+    fn acquire(&self) -> Option<&Connection>;
+    fn release(&mut self, conn: Connection);
+}
+
+impl Drop for ConnectionPool {
+    fn drop(&mut self);
+}
+```
+
+Contains the type definition and all method signatures (no bodies).
+Multiple `impl` blocks within the same file are aggregated.
+
+**Function chunk** (per function/method):
+
+```rust
+// src/pool.rs
+impl ConnectionPool {
+    fn acquire(&self) -> Option<&Connection> {
+        // actual function body ...
+    }
+}
+```
+
+Contains a single function body wrapped in its parent `impl` context.
+Free functions include module path context instead.
 
 > [!note] Constraints
 > - Chunking quality depends on tree-sitter grammar availability for
 >   the target language.
 > - Very large functions (>200 lines) may need sub-function splitting
 >   — strategy TBD.
+
+### 🚧 Cross-File Skeleton Assembly
+
+Type overview chunks aggregate `impl` blocks found in the same file.
+Cross-file assembly (e.g., trait impls in another module) follows a
+**conservative policy**:
+
+- **Same file**: all `impl Type` blocks are merged into one skeleton.
+  Safe — same file guarantees same type.
+- **Different file**: kept as separate chunks. Not merged unless the
+  fully qualified type path is unambiguously identical.
+- **Ambiguous cases** (name collision across modules, proc macro
+  generated code): never merged.
+
+False negatives (incomplete skeleton) are acceptable — the individual
+`impl` chunks still exist and are searchable. False positives
+(incorrectly merged impls from different types) are not acceptable.
+
+### 🚧 Dual Text Representation
+
+Each chunk stores two text fields, optimized for different consumers:
+
+| Field | Consumer | Contents |
+|-------|----------|----------|
+| `display_text` | LLM (search results) | Clean, self-contained code chunk |
+| `embedding_text` | Embedding model | `display_text` + contextual metadata |
+
+`embedding_text` prepends additional context to improve retrieval:
+
+```
+// crate::net::pool (src/pool.rs:42..67)
+// pub struct ConnectionPool — connection management
+impl ConnectionPool {
+    fn acquire(&self) -> Option<&Connection> {
+        // body ...
+    }
+}
+```
+
+Additional context in `embedding_text` may include:
+- Fully qualified module path
+- File path and line range
+- Doc comments
+- Parent type signature
+- Visibility and kind annotations
+
+The two fields can be tuned independently — `embedding_text` for
+retrieval quality, `display_text` for LLM readability.
 
 ### 🚧 Chunk Metadata
 
@@ -70,11 +147,11 @@ presentation without relying on a separate keyword index.
 |-------|---------|---------|
 | `symbol_name` | `ConnectionPool::new` | Exact-match score boosting |
 | `kind` | function, struct, trait, impl, enum, module | Filtering by symbol kind |
-| `parent` | `ConnectionPool` | Auto-attach containing type context |
+| `parent` | `ConnectionPool` | Skeleton linkage |
 | `visibility` | pub, pub(crate), private | Filter by API surface |
 | `file_path` | `src/pool.rs` | Source location |
 | `line_range` | `42..87` | Source reference |
-| `chunk_level` | 0 (skeleton), 1 (body), 2 (reference) | Context assembly |
+| `chunk_type` | overview, function | Chunk kind |
 | `signature` | `pub fn new(size: usize) -> Self` | Quick preview |
 
 When a query exactly matches a chunk's `symbol_name`, that chunk
@@ -107,8 +184,8 @@ cargo debrief search <query> [--top-k N]
 - `--top-k` defaults to a reasonable value (e.g., 10).
 - Returns ranked code chunks with file path, line range, relevance
   score, and chunk metadata.
-- Each result includes the chunk text and, for function-level hits,
-  the parent skeleton for context.
+- Each result returns the chunk's `display_text`. Embeddings are
+  computed from `embedding_text` (which includes additional context).
 
 ### 🚧 Vector Similarity Search
 
@@ -180,8 +257,9 @@ The search index is serialized to disk for fast reload across sessions.
 - Format: bincode-serialized, with a version field in the header.
 - On version mismatch (e.g., after a tool upgrade), the index is
   invalidated and a full re-index is triggered automatically.
-- Index includes: chunk text, chunk metadata, vector embeddings,
-  file metadata, last-indexed commit hash, embedding model identifier.
+- Index includes: chunk display_text, chunk embedding_text, chunk
+  metadata, vector embeddings, file metadata, last-indexed commit
+  hash, embedding model identifier.
 
 > [!note] Constraints
 > - No external database. The index is a single file (or small set of
