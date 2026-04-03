@@ -39,6 +39,10 @@ CLI talks only through `DebriefService` trait. Phase 1 uses `InProcessService`
 - **Embedding model management**: auto-download default model, configurable
   per-project or globally via `set-embedding-model`.
 
+## Spec
+
+- `spec/cargo-debrief.md` — Full feature spec: indexing, search, CLI, daemon, model management
+
 ## Conventions
 
 - Tickets: `ai-docs/tickets/<status>/YYMMDD-<type>-<name>.md`
