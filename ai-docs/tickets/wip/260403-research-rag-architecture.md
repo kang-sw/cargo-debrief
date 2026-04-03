@@ -135,8 +135,7 @@ names ARE code, so they never go stale.
 
 ```
 cargo debrief index [<path>]                          # initial/incremental indexing
-cargo debrief search <query> [--top-k N]              # hybrid search
-cargo debrief get-symbol <name>                       # exact symbol lookup
+cargo debrief search <query> [--top-k N]              # vector search + metadata boosting
 cargo debrief get-skeleton <file>                     # file-level overview
 cargo debrief set-embedding-model [--global] <name>   # configure model
 cargo debrief daemon status                           # check daemon state
@@ -149,8 +148,7 @@ It auto-expires after idle timeout.
 
 MCP server mode will be layered on the daemon later, exposing the
 same capabilities as the CLI:
-- `search_code(query, top_k)` — hybrid search, return ranked chunks
-- `get_symbol(name)` — exact symbol lookup (signature + body)
+- `search_code(query, top_k)` — vector search, return ranked chunks
 - `get_skeleton(file)` — file-level declaration overview
 - `index_project(root_path)` — trigger indexing
 
@@ -159,7 +157,7 @@ same capabilities as the CLI:
 - Language: Rust (2024 edition)
 - Parsing: `tree-sitter` + `tree-sitter-rust` (start with Rust; `Chunker` trait for language extensibility)
 - Embedding: `ort` (ONNX Runtime) with nomic-embed-code or similar
-- Search: custom hybrid (cosine similarity + BM25)
+- Vector search: `hnsw_rs` (ANN) with metadata-based score boosting
 - Serialization: `serde` + `bincode` (version field in index header from day one)
 - CLI: `clap`
 - IPC: CLI ↔ daemon communication (Unix socket or similar)
@@ -179,15 +177,22 @@ same capabilities as the CLI:
 - ~~Multi-language: C++-only or language-agnostic?~~ → Rust-first, `Chunker`
   trait for extensibility. Validate with git diff/file tracking before
   expanding to other languages.
+- ~~BM25 needed alongside vector search?~~ → No. Vector search + metadata
+  score boosting replaces BM25. Exact symbol matching handled via
+  `symbol_name` metadata boost. BM25 (tantivy) can be added later if needed.
+- ~~Separate `get-symbol` command?~~ → Deferred. Metadata-boosted search
+  covers exact symbol lookup. Dedicated command adds complexity without
+  sufficient benefit for MVP.
+- ~~Search library?~~ → `hnsw_rs` for vector ANN search. Pure Rust,
+  lightweight, mmap for data vectors. BM25/tantivy deferred.
 
 ## Next Steps
 
 - [ ] Define `DebriefService` trait + `InProcessService` scaffold
 - [ ] Implement git file tracking (diff-based changed file detection)
-- [ ] Prototype tree-sitter Rust chunking (Chunker trait + Rust impl)
+- [ ] Prototype tree-sitter Rust chunking (Chunker trait + chunk metadata)
 - [ ] Set up ort-based embedding pipeline with a test model
-- [ ] Implement BM25 index
-- [ ] Implement vector search + hybrid scoring
+- [ ] Implement vector search with hnsw_rs + metadata score boosting
 - [ ] Versioned index serialization (store module)
 - [ ] CLI commands (clap) wired through DebriefService
 - [ ] Daemon extraction (Phase 2)

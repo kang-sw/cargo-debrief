@@ -4,12 +4,11 @@ summary: RAG-based code retrieval tool — AST-aware chunking and hybrid search 
 features:
   - 🚧 Code Indexing
     - 🚧 AST-Aware Chunking
+    - 🚧 Chunk Metadata
     - 🚧 Git-Based Incremental Re-Indexing
   - 🚧 Code Search
-    - 🚧 BM25 Keyword Search
     - 🚧 Vector Similarity Search
-    - 🚧 Hybrid Scoring
-  - 🚧 Symbol Lookup
+    - 🚧 Metadata Score Boosting
   - 🚧 File Skeleton
   - 🚧 Embedding Model Management
   - 🚧 Index Persistence
@@ -21,9 +20,9 @@ features:
 # cargo-debrief
 
 A CLI tool providing RAG (Retrieval-Augmented Generation) over codebases.
-Parses source code into AST-aware chunks, embeds them as vectors, and
-serves hybrid search (BM25 + vector similarity) so LLMs receive only the
-relevant code fragments instead of entire files.
+Parses source code into metadata-rich, AST-aware chunks, embeds them as
+vectors, and serves search with metadata-boosted scoring so LLMs receive
+only the relevant code fragments instead of entire files.
 
 ## 🚧 Code Indexing
 
@@ -61,6 +60,27 @@ context without the full file.
 > - Very large functions (>200 lines) may need sub-function splitting
 >   — strategy TBD.
 
+### 🚧 Chunk Metadata
+
+Every chunk carries structured metadata extracted at parse time.
+Metadata enables search filtering, score boosting, and result
+presentation without relying on a separate keyword index.
+
+| Field | Example | Purpose |
+|-------|---------|---------|
+| `symbol_name` | `ConnectionPool::new` | Exact-match score boosting |
+| `kind` | function, struct, trait, impl, enum, module | Filtering by symbol kind |
+| `parent` | `ConnectionPool` | Auto-attach containing type context |
+| `visibility` | pub, pub(crate), private | Filter by API surface |
+| `file_path` | `src/pool.rs` | Source location |
+| `line_range` | `42..87` | Source reference |
+| `chunk_level` | 0 (skeleton), 1 (body), 2 (reference) | Context assembly |
+| `signature` | `pub fn new(size: usize) -> Self` | Quick preview |
+
+When a query exactly matches a chunk's `symbol_name`, that chunk
+receives a score boost — providing the precision of exact symbol
+lookup without a separate command or keyword index.
+
 ### 🚧 Git-Based Incremental Re-Indexing
 
 On re-index, only files changed since the last indexed commit are
@@ -78,56 +98,47 @@ re-parsed and re-embedded.
 
 ## 🚧 Code Search
 
-Hybrid search combining keyword matching and semantic similarity.
+Vector similarity search with metadata-based score boosting.
 
 ```
 cargo debrief search <query> [--top-k N]
 ```
 
 - `--top-k` defaults to a reasonable value (e.g., 10).
-- Returns ranked code chunks with file path, line range, and relevance score.
+- Returns ranked code chunks with file path, line range, relevance
+  score, and chunk metadata.
 - Each result includes the chunk text and, for function-level hits,
   the parent skeleton for context.
 
-### 🚧 BM25 Keyword Search
-
-Term-frequency based ranking over chunk text. Effective for exact symbol
-names, identifiers, and specific code patterns.
-
-- Queries like `ResourceManager::release` or `fn parse_token` match
-  literally against chunk content.
-
 ### 🚧 Vector Similarity Search
 
-Cosine similarity between query embedding and chunk embeddings. Effective
-for natural-language queries describing intent or behavior.
+Cosine similarity between query embedding and chunk embeddings.
+Handles both natural-language and identifier-based queries:
 
-- Queries like "memory deallocation logic" or "error handling in HTTP
-  client" match semantically even without exact keyword overlap.
+- `"memory deallocation logic"` — matches semantically
+- `"ConnectionPool"` — embedding model picks up identifier tokens
 
-### 🚧 Hybrid Scoring
+Uses hnsw_rs for approximate nearest neighbor search.
 
-BM25 and vector scores are combined into a single ranking. The
-combination strategy (e.g., reciprocal rank fusion, weighted sum) is
-TBD — will be tuned empirically.
+### 🚧 Metadata Score Boosting
+
+Vector similarity scores are adjusted based on chunk metadata matches:
+
+- **Exact symbol name match**: query text matches `symbol_name` field
+  → significant score boost. Provides exact-lookup precision within
+  the search command.
+- **Kind/visibility filtering**: optional flags to narrow results
+  (e.g., only public functions, only structs).
+
+This replaces the need for a separate BM25 keyword index or a
+dedicated symbol lookup command.
 
 > [!note] Constraints
-> - Brute-force cosine similarity over all chunks. Designed for
->   project-scale data (~20K chunks max, ~60MB vector data).
->   Not suitable for monorepo-scale (>100K files).
-
-## 🚧 Symbol Lookup
-
-Retrieve a specific symbol by exact name.
-
-```
-cargo debrief get-symbol <name>
-```
-
-- Returns the symbol's signature and full body.
-- Matches against function names, type names, trait names, etc.
-- If multiple symbols share a name (e.g., across modules), returns all
-  matches with disambiguation by file path.
+> - Designed for project-scale data (~20K chunks, ~60MB vectors).
+>   Suitable for most single-project codebases. Not tested at
+>   monorepo scale (>100K files).
+> - BM25 keyword search may be added later if metadata boosting
+>   proves insufficient for exact-match queries.
 
 ## 🚧 File Skeleton
 
@@ -169,7 +180,7 @@ The search index is serialized to disk for fast reload across sessions.
 - Format: bincode-serialized, with a version field in the header.
 - On version mismatch (e.g., after a tool upgrade), the index is
   invalidated and a full re-index is triggered automatically.
-- Index includes: chunk text, vector embeddings, BM25 term frequencies,
+- Index includes: chunk text, chunk metadata, vector embeddings,
   file metadata, last-indexed commit hash, embedding model identifier.
 
 > [!note] Constraints
@@ -200,8 +211,7 @@ MCP (Model Context Protocol) server exposing the same capabilities as
 the CLI for direct LLM integration. Deferred beyond Phase 2.
 
 - Will be layered on the daemon as an additional interface.
-- Planned tools: `search_code`, `get_symbol`, `get_skeleton`,
-  `index_project`.
+- Planned tools: `search_code`, `get_skeleton`, `index_project`.
 
 > [!note] Constraints
 > - MCP SDK choice deferred. Will evaluate when implementation begins.

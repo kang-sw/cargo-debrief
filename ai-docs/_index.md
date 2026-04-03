@@ -54,7 +54,8 @@ CLI talks only through `DebriefService` trait. Phase 1 uses `InProcessService`
 cargo build
 cargo test
 cargo run -- index [<path>]                          # index current directory
-cargo run -- search "query" [--top-k N]              # hybrid search
+cargo run -- search "query" [--top-k N]              # vector search + metadata boosting
+cargo run -- get-skeleton <file>                     # file-level overview
 cargo run -- set-embedding-model [--global] <name>   # configure model
 cargo run -- daemon status                           # check daemon
 ```
