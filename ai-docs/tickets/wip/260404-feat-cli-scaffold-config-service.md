@@ -1,5 +1,6 @@
 ---
 title: "CLI scaffold, config system, and service trait"
+started: 2026-04-04
 parent: 260403-epic-mvp-implementation
 related:
   - 260403-research-rag-architecture  # architecture decisions
