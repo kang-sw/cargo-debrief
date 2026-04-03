@@ -7,13 +7,17 @@ Planned module layout (not yet implemented):
 ```
 src/
   main.rs       — CLI entrypoint (clap): index, search, set-embedding-model, daemon
-  daemon.rs     — background service (lazy-spawn, idle-expire, per-machine singleton)
+  service.rs    — DebriefService trait (service boundary) + InProcessService
   chunker.rs    — Chunker trait + tree-sitter AST-aware chunking (Rust-first)
   embedder.rs   — ONNX Runtime embedding inference + model management
   search.rs     — hybrid search (vector cosine similarity + BM25)
   git.rs        — git diff tracking, incremental re-indexing
   store.rs      — index serialization/deserialization (serde + bincode, versioned)
+  daemon.rs     — (Phase 2) background service + DaemonClient transport
 ```
+
+CLI talks only through `DebriefService` trait. Phase 1 uses `InProcessService`
+(direct library calls). Phase 2 adds `DaemonClient` (IPC to daemon process).
 
 ## Key Design Decisions
 

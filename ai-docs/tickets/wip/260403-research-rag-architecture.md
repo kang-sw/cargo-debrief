@@ -96,6 +96,17 @@ Option B (chosen): CLI-first with lazy-spawned daemon.
 - Rationale: AI CLI tool usage is strong, debugging is easier, no special
   setup needed — the daemon lifecycle is invisible to the user
 
+Implementation phasing:
+- Phase 1: `DebriefService` trait as service boundary. `InProcessService`
+  impl — CLI calls library directly, no IPC. All core logic developed here.
+- Phase 2: `DaemonClient` impl — CLI sends requests over IPC to daemon
+  process. Daemon hosts `InProcessService` internally.
+- The trait surface mirrors CLI commands (index, search, get_symbol,
+  get_skeleton). Internal modules (chunker, embedder, search) are NOT
+  exposed through the trait — they remain implementation details.
+- Transport abstraction is cheap (trait is small, in-process impl is
+  trivial delegation) and eliminates refactoring cost at daemon extraction.
+
 **7. LLM-based chunk summarization — deferred**
 
 Using a local LLM (13B) to generate natural-language summaries of each
@@ -171,8 +182,12 @@ same capabilities as the CLI:
 
 ## Next Steps
 
-- [ ] Evaluate Rust MCP SDK options
-- [ ] Prototype tree-sitter C++ chunking (extract functions, classes, signatures)
+- [ ] Define `DebriefService` trait + `InProcessService` scaffold
+- [ ] Implement git file tracking (diff-based changed file detection)
+- [ ] Prototype tree-sitter Rust chunking (Chunker trait + Rust impl)
 - [ ] Set up ort-based embedding pipeline with a test model
-- [ ] Implement basic hybrid search
-- [ ] Wire up as MCP server
+- [ ] Implement BM25 index
+- [ ] Implement vector search + hybrid scoring
+- [ ] Versioned index serialization (store module)
+- [ ] CLI commands (clap) wired through DebriefService
+- [ ] Daemon extraction (Phase 2)
