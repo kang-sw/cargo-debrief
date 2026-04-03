@@ -16,8 +16,9 @@ only a fraction is relevant to the current task.
 
 ## Goal
 
-Build an MCP server that provides RAG-based code retrieval — feeding the
-LLM only the relevant code fragments instead of entire files.
+Build a CLI tool (with future MCP server mode) that provides RAG-based
+code retrieval — feeding the LLM only the relevant code fragments
+instead of entire files.
 
 ## Research Summary
 
@@ -35,20 +36,43 @@ Fixed-length chunking (e.g., 512 tokens) breaks code at arbitrary
 boundaries. Tree-sitter parses source into an AST, enabling chunking
 at semantic boundaries: functions, classes, structs, namespaces.
 
-Hierarchical chunking strategy:
-- Level 0 (skeleton): class/struct declarations — signatures only, no bodies (~10 lines)
-- Level 1 (function): individual function/method bodies (~20-100 lines)
-- Level 2 (reference): declarations of types referenced by level 1 chunks
+Two concrete chunk types:
 
-On a search hit at level 1, auto-attach the level 0 skeleton of the
-containing class. This gives the LLM structural context without the
-full file.
+- **Type overview chunk** (per type): struct/enum/trait definition +
+  all method signatures (no bodies). Aggregates `impl` blocks from
+  the same file. Answers "what can this type do?" queries.
+- **Function chunk** (per function): single function body wrapped in
+  `impl Type { fn ... { body } }` context. Self-contained — the impl
+  wrapper gives embedding models type context without separate assembly.
 
-**2. Hybrid search: BM25 + vector similarity**
+Cross-file skeleton assembly follows a conservative policy:
+- Same-file `impl` blocks → merged into one skeleton. Safe.
+- Different-file `impl` blocks → kept as separate chunks. Not merged
+  unless fully qualified path is unambiguously identical.
+- Ambiguous cases (name collision, proc macro) → never merged.
+- Rationale: false negatives (incomplete skeleton) are acceptable;
+  false positives (wrong type merged) are not.
 
-- BM25 (keyword): exact symbol name matching, e.g., `"ResourceManager::release"`
-- Vector (semantic): natural language queries, e.g., "memory deallocation logic"
-- Neither alone is sufficient for code search — combine both.
+Each chunk stores dual text representations:
+- `display_text`: clean code shown to the LLM in search results.
+- `embedding_text`: `display_text` + contextual metadata (module path,
+  file path, doc comments, parent type signature). The two can be
+  tuned independently for retrieval quality vs LLM readability.
+
+**2. Vector search with metadata score boosting**
+
+Vector-only search (no BM25). Exact symbol matching handled via
+chunk metadata (`symbol_name` field) score boosting instead of a
+separate keyword index.
+
+- Vector (semantic): natural language + identifier queries
+- Metadata boost: query matches `symbol_name` → score boost
+- BM25 (tantivy) available as future fallback if needed
+
+Rationale: BM25's strength (exact keyword matching) overlaps with
+metadata boosting for symbol names. Vector search handles semantic
+discovery. Separate `get-symbol` command was also deferred — search
+with metadata boost covers its use case.
 
 **3. Embedding model selection**
 
@@ -66,13 +90,22 @@ Model management:
 - Per-project or global model selection
 - Models cached in a standard user data directory
 
-**4. Vector storage — keep it simple**
+**4. Vector storage — hnsw_rs**
 
-For project-scale data (~20K chunks max):
-- In-memory `Vec<[f32; 768]>`, brute-force cosine similarity
-- Serialized to disk with `serde` + `bincode`
-- 20K chunks * 768 dims * 4 bytes = ~60MB — trivially fits in memory
-- No external vector DB needed (ChromaDB, Qdrant, etc. are overkill)
+`hnsw_rs` for ANN vector search. Pure Rust, lightweight, mmap for
+data vectors.
+
+Scale analysis:
+- ~20K chunks (most single projects): ~45 MB total (graph + vectors)
+- ~100K chunks (compiler-scale): ~210 MB total
+- Brute-force would also work at 20K scale (<10ms), but hnsw_rs
+  future-proofs for larger codebases at negligible cost.
+
+Evaluated alternatives:
+- `usearch`: full mmap (graph+data) but requires C++ compiler.
+- `lancedb`: BM25+vectors but massive dependency tree (Arrow/DataFusion).
+- `qdrant`: requires separate server process.
+- Brute-force: sufficient for 20K but no growth headroom.
 
 **5. Git-based incremental re-indexing**
 
@@ -101,7 +134,7 @@ Implementation phasing:
   impl — CLI calls library directly, no IPC. All core logic developed here.
 - Phase 2: `DaemonClient` impl — CLI sends requests over IPC to daemon
   process. Daemon hosts `InProcessService` internally.
-- The trait surface mirrors CLI commands (index, search, get_symbol,
+- The trait surface mirrors CLI commands (index, search,
   get_skeleton). Internal modules (chunker, embedder, search) are NOT
   exposed through the trait — they remain implementation details.
 - Transport abstraction is cheap (trait is small, in-process impl is
