@@ -77,6 +77,12 @@ User-level defaults stored in a platform-standard config directory
 - Project-level config (`.debrief/config.toml`) overrides global.
   Local config (`.git/debrief/local-config.toml`) overrides both.
 
+> [!note] Constraints
+> - Git root detection looks for `.git` as a **directory** only. Git
+>   worktrees and submodules use `.git` as a file — project and local
+>   config paths will not be resolved in those cases (falls back to
+>   global config only).
+
 ## 🚧 Code Indexing
 
 Index a codebase for subsequent search. Parses source files with
@@ -221,6 +227,9 @@ re-parsed and re-embedded.
 
 > [!note] Constraints
 > - Requires a git repository. Non-git directories always do full re-index.
+> - Git worktrees and submodules (`.git` file, not directory) are not
+>   detected — treated as non-git directories until worktree support is
+>   added.
 > - Tracks the working tree's HEAD, not uncommitted changes (TBD whether
 >   to include staged/unstaged changes).
 

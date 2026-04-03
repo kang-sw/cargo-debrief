@@ -133,6 +133,15 @@ are absent (global + default only).
 - Config merges correctly when multiple layers are present.
 - Unit tests for config path resolution and layer merging.
 
+### Result (90d43cb) — 26-04-04
+
+Implemented as specified. 7 config tests + CLI parsing verified.
+
+- `toml = "1"` used instead of `"0.8"` (ticket says "use latest compatible")
+- `lib.rs` exports `config` module; `main.rs` is thin clap wrapper
+- `find_git_root` only handles `.git` as directory (worktree/submodule
+  limitation documented in code and spec)
+
 ## Phase 2: DebriefService Trait + InProcessService
 
 Define the async service boundary and wire CLI subcommands through it.
@@ -215,6 +224,19 @@ that compiles cleanly.
 - Trait is object-safe or explicitly not (document the choice).
 - Integration test: construct `InProcessService`, call each method,
   assert error contains "not yet implemented".
+
+### Result (b943612) — 26-04-04
+
+Implemented as specified with one deviation:
+
+- Used native RPITIT (`fn ... -> impl Future + Send`) instead of
+  `trait_variant` or `async-trait` — Rust 2024 edition supports this
+  natively. Trait is non-object-safe (documented).
+- CLI subcommands now dispatch through `InProcessService`, format
+  results, and print. Errors surface via anyhow's default display.
+- 1 integration test verifying all 4 stub methods return expected errors.
+- Review fixes (540c5b6): clippy let-chains, object-safety doc,
+  malformed TOML test. Total: 8 tests.
 
 ## Future Phases (out of scope)
 

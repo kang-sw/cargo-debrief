@@ -2,22 +2,26 @@
 
 ## Architecture
 
-Planned module layout (not yet implemented):
+Module layout (`lib.rs` + `main.rs` split — `main.rs` is thin clap
+wrapper, all logic behind `lib.rs`):
 
 ```
 src/
-  main.rs       — CLI entrypoint (clap): index, search, set-embedding-model, daemon
-  service.rs    — DebriefService trait (service boundary) + InProcessService
-  chunker.rs    — Chunker trait + tree-sitter AST-aware chunking (Rust-first)
-  embedder.rs   — ONNX Runtime embedding inference + model management
-  search.rs     — hybrid search (vector cosine similarity + BM25)
-  git.rs        — git diff tracking, incremental re-indexing
-  store.rs      — index serialization/deserialization (serde + bincode, versioned)
-  daemon.rs     — (Phase 2) background service + DaemonClient transport
+  main.rs       — CLI entrypoint (clap): index, search, get-skeleton, set-embedding-model
+  lib.rs        — module re-exports
+  config.rs     — 3-layer config resolution (local → project → global → default)
+  service.rs    — DebriefService trait (async RPITIT) + InProcessService
+  chunker/      — (planned) Chunker trait + tree-sitter AST-aware chunking
+  embedder.rs   — (planned) ONNX Runtime embedding inference + model management
+  search.rs     — (planned) vector search + metadata score boosting
+  git.rs        — (planned) git diff tracking, incremental re-indexing
+  store.rs      — (planned) index serialization (serde + bincode, versioned)
+  daemon.rs     — (Phase 2) daemon mode via CLI subcommand
 ```
 
-CLI talks only through `DebriefService` trait. Phase 1 uses `InProcessService`
+CLI dispatches through `DebriefService` trait. Phase 1 uses `InProcessService`
 (direct library calls). Phase 2 adds `DaemonClient` (IPC to daemon process).
+Single binary — daemon runs as `cargo debrief daemon`, not a separate executable.
 
 ## Key Design Decisions
 
@@ -25,10 +29,9 @@ CLI talks only through `DebriefService` trait. Phase 1 uses `InProcessService`
   is lazy-spawned on first use, auto-expires on idle, serves all requests
   on the machine. MCP server mode layered on top later.
 - **No external DB**: vectors stored in-memory as `Vec<[f32; N]>`, serialized
-  to disk with bincode (versioned format). Brute-force cosine similarity
-  is fast enough for ~20K chunks.
-- **Hybrid search**: BM25 for exact symbol/keyword matching + vector
-  similarity for semantic/natural-language queries.
+  to disk with bincode (versioned format).
+- **Vector search + metadata boosting**: cosine similarity with hnsw_rs,
+  metadata score boosting for exact symbol name matches.
 - **Hierarchical chunking**: level 0 (struct skeletons — signatures
   only), level 1 (function bodies), level 2 (referenced type declarations).
   Search hits at level 1 auto-attach level 0 context.
@@ -60,6 +63,14 @@ cargo run -- set-embedding-model [--global] <name>   # configure model
 cargo run -- daemon status                           # check daemon
 ```
 
+## Mental Model
+
+See `ai-docs/mental-model/` for operational knowledge:
+- `overview.md` — crate structure, async runtime, stub state
+- `config.md` — 3-layer resolution, merge semantics, known limitations
+- `service.md` — DebriefService trait, RPITIT non-object-safety, dispatch options
+
 ## Session Notes
 
 - Initial project setup. Research ticket captures architecture discussion.
+- Phase 1A scaffold implemented: CLI, config, service trait.
