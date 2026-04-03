@@ -60,6 +60,12 @@ Target: ~137M-500M parameter models running locally.
 
 Inference via ONNX Runtime (`ort` crate) for Rust-native execution.
 
+Model management:
+- Auto-download on first use with a reasonable default model
+- `cargo debrief set-embedding-model [--global] <model-name>` to reconfigure
+- Per-project or global model selection
+- Models cached in a standard user data directory
+
 **4. Vector storage — keep it simple**
 
 For project-scale data (~20K chunks max):
@@ -75,13 +81,20 @@ For project-scale data (~20K chunks max):
 - Re-parse and re-embed only changed files
 - Far more reliable than filesystem mtime watching
 
-**6. MCP server lifecycle**
+**6. CLI-first with daemon architecture**
 
-Option A (chosen): MCP server IS the process. Claude Code spawns it,
-it lives for the session, index loads from disk on startup (seconds).
+Option A (rejected): MCP server IS the process. Claude Code spawns it,
+it lives for the session.
 
-Option B (rejected): separate daemon + thin MCP client. Added IPC
-complexity for marginal benefit (avoiding ~2s index reload).
+Option B (chosen): CLI-first with lazy-spawned daemon.
+- Primary interface is the CLI (`cargo debrief index`, `search`, etc.)
+- First CLI invocation transparently spawns a background daemon if not running
+- Daemon holds indexes in memory, serves all requests on the machine
+- Daemon expires after configurable idle timeout (no interaction → auto-exit)
+- Per-machine singleton: one daemon serves all CLI invocations and sessions
+- MCP server mode can be layered on top of the daemon later
+- Rationale: AI CLI tool usage is strong, debugging is easier, no special
+  setup needed — the daemon lifecycle is invisible to the user
 
 **7. LLM-based chunk summarization — deferred**
 
@@ -110,39 +123,51 @@ names ARE code, so they never go stale.
 ### Planned CLI Interface
 
 ```
-cargo-debrief index <path>           # initial/incremental indexing
-cargo-debrief serve                  # MCP server mode
-cargo-debrief search <query>         # direct search (debug/testing)
+cargo debrief index [<path>]                          # initial/incremental indexing
+cargo debrief search <query> [--top-k N]              # hybrid search
+cargo debrief get-symbol <name>                       # exact symbol lookup
+cargo debrief get-skeleton <file>                     # file-level overview
+cargo debrief set-embedding-model [--global] <name>   # configure model
+cargo debrief daemon status                           # check daemon state
 ```
 
-### Planned MCP Tools
+The daemon is spawned transparently by any command that needs it.
+It auto-expires after idle timeout.
 
-- `index_project(root_path)` — trigger indexing
+### Planned MCP Tools (deferred)
+
+MCP server mode will be layered on the daemon later, exposing the
+same capabilities as the CLI:
 - `search_code(query, top_k)` — hybrid search, return ranked chunks
 - `get_symbol(name)` — exact symbol lookup (signature + body)
 - `get_skeleton(file)` — file-level declaration overview
-- `get_references(symbol)` — call sites / usage locations
+- `index_project(root_path)` — trigger indexing
 
 ### Technology Stack
 
 - Language: Rust (2024 edition)
-- Parsing: `tree-sitter` + `tree-sitter-cpp` (extensible to other languages)
+- Parsing: `tree-sitter` + `tree-sitter-rust` (start with Rust; `Chunker` trait for language extensibility)
 - Embedding: `ort` (ONNX Runtime) with nomic-embed-code or similar
 - Search: custom hybrid (cosine similarity + BM25)
-- Serialization: `serde` + `bincode`
+- Serialization: `serde` + `bincode` (version field in index header from day one)
 - CLI: `clap`
-- MCP: community Rust MCP SDK (evaluate maturity) or raw JSON-RPC
+- IPC: CLI ↔ daemon communication (Unix socket or similar)
 - Async: `tokio`
 
 ## Open Questions
 
-- Which Rust MCP SDK to use? Evaluate `mcp-rs`, `rmcp`, or roll minimal
-  JSON-RPC over stdio.
 - Tokenizer handling for ONNX models — bundle tokenizer.json or use
   `tokenizers` crate?
-- Should the index file format be versioned from the start?
-- Multi-language support: start C++-only or design for language-agnostic
-  chunking from day one?
+- Daemon IPC mechanism — Unix domain socket? Named pipe? HTTP on localhost?
+- Default embedding model selection — which model ships as the default?
+
+## Resolved Questions
+
+- ~~Which Rust MCP SDK to use?~~ → Deferred. CLI-first, MCP later.
+- ~~Index file format versioned from the start?~~ → Yes. Version u32 in header.
+- ~~Multi-language: C++-only or language-agnostic?~~ → Rust-first, `Chunker`
+  trait for extensibility. Validate with git diff/file tracking before
+  expanding to other languages.
 
 ## Next Steps
 

@@ -6,29 +6,34 @@ Planned module layout (not yet implemented):
 
 ```
 src/
-  main.rs       — CLI entrypoint (clap): index, serve, search subcommands
-  mcp.rs        — MCP server (tool definitions, JSON-RPC)
-  indexer.rs    — tree-sitter parsing + AST-aware chunking
-  embedder.rs   — ONNX Runtime embedding inference
+  main.rs       — CLI entrypoint (clap): index, search, set-embedding-model, daemon
+  daemon.rs     — background service (lazy-spawn, idle-expire, per-machine singleton)
+  chunker.rs    — Chunker trait + tree-sitter AST-aware chunking (Rust-first)
+  embedder.rs   — ONNX Runtime embedding inference + model management
   search.rs     — hybrid search (vector cosine similarity + BM25)
   git.rs        — git diff tracking, incremental re-indexing
-  store.rs      — index serialization/deserialization (serde + bincode)
+  store.rs      — index serialization/deserialization (serde + bincode, versioned)
 ```
 
 ## Key Design Decisions
 
+- **CLI-first with daemon**: Primary interface is CLI. Background daemon
+  is lazy-spawned on first use, auto-expires on idle, serves all requests
+  on the machine. MCP server mode layered on top later.
 - **No external DB**: vectors stored in-memory as `Vec<[f32; N]>`, serialized
-  to disk with bincode. Brute-force cosine similarity is fast enough for
-  ~20K chunks.
+  to disk with bincode (versioned format). Brute-force cosine similarity
+  is fast enough for ~20K chunks.
 - **Hybrid search**: BM25 for exact symbol/keyword matching + vector
   similarity for semantic/natural-language queries.
-- **Hierarchical chunking**: level 0 (class/struct skeletons — signatures
+- **Hierarchical chunking**: level 0 (struct skeletons — signatures
   only), level 1 (function bodies), level 2 (referenced type declarations).
   Search hits at level 1 auto-attach level 0 context.
 - **Git-based incremental indexing**: store last-indexed commit hash, diff
-  against HEAD to find changed files.
-- **Embedding model**: targeting ~137M param models (e.g., nomic-embed-code)
-  via ONNX Runtime. Runs on CPU with acceptable latency.
+  against HEAD to find changed files. Prioritize validating this early.
+- **Rust-first, language-extensible**: Start with tree-sitter-rust. Chunker
+  trait allows adding more languages later.
+- **Embedding model management**: auto-download default model, configurable
+  per-project or globally via `set-embedding-model`.
 
 ## Conventions
 
@@ -40,9 +45,10 @@ src/
 ```bash
 cargo build
 cargo test
-cargo run -- index .          # index current directory
-cargo run -- serve            # start MCP server
-cargo run -- search "query"   # CLI search (debug)
+cargo run -- index [<path>]                          # index current directory
+cargo run -- search "query" [--top-k N]              # hybrid search
+cargo run -- set-embedding-model [--global] <name>   # configure model
+cargo run -- daemon status                           # check daemon
 ```
 
 ## Session Notes

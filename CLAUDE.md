@@ -5,10 +5,11 @@
 
 ## Project Summary
 
-**cargo-debrief** — A Rust CLI tool and MCP server that provides RAG
+**cargo-debrief** — A Rust CLI tool that provides RAG
 (Retrieval-Augmented Generation) over codebases. Uses tree-sitter for
 AST-aware chunking and hybrid search (BM25 + vector similarity) to feed
 LLMs only the relevant code fragments, reducing context window consumption.
+CLI-first with a lazy-spawned background daemon for index serving.
 
 ## Tech Stack
 
@@ -26,8 +27,8 @@ ai-docs/       — Project knowledge and cross-session context
 
 1. **Single binary.** The tool ships as one binary — no external DB, no
    sidecar processes. Vector index and BM25 index are serialized to disk.
-2. **MCP-first.** Primary interface is MCP server mode for Claude Code
-   integration. CLI search is secondary (for debugging/testing).
+2. **CLI-first.** Primary interface is the CLI. A background daemon is
+   lazy-spawned on first use and auto-expires on idle. MCP layered later.
 3. **Git-aware indexing.** Incremental re-indexing tracks `git diff` between
    last-indexed commit and HEAD. Never re-index unchanged files.
 
