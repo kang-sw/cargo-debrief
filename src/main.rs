@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use cargo_debrief::service::{DebriefService, InProcessService};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -47,25 +48,40 @@ async fn main() -> Result<()> {
 
     let project_root = std::env::current_dir()?;
     let config_paths = cargo_debrief::config::config_paths(&project_root);
-    let _config = cargo_debrief::config::load_config(&config_paths)?;
+    let config = cargo_debrief::config::load_config(&config_paths)?;
+    let service = InProcessService::new(config);
 
     match cli.command {
         Command::Index { path } => {
-            eprintln!("index: not yet implemented (path: {})", path.display());
+            let result = service.index(&path).await?;
+            println!(
+                "Indexed {} files, {} chunks created.",
+                result.files_indexed, result.chunks_created
+            );
         }
         Command::Search { query, top_k } => {
-            eprintln!("search: not yet implemented (query: {query:?}, top_k: {top_k})");
+            let results = service.search(&query, top_k).await?;
+            for (i, r) in results.iter().enumerate() {
+                println!(
+                    "#{} [score: {:.4}] {}:{}-{}",
+                    i + 1,
+                    r.score,
+                    r.file_path,
+                    r.line_range.0,
+                    r.line_range.1,
+                );
+                println!("{}", r.display_text);
+                println!();
+            }
         }
         Command::GetSkeleton { file } => {
-            eprintln!(
-                "get-skeleton: not yet implemented (file: {})",
-                file.display()
-            );
+            let skeleton = service.get_skeleton(&file).await?;
+            println!("{skeleton}");
         }
         Command::SetEmbeddingModel { model, global } => {
-            eprintln!(
-                "set-embedding-model: not yet implemented (model: {model:?}, global: {global})"
-            );
+            service.set_embedding_model(&model, global).await?;
+            let scope = if global { "global" } else { "project" };
+            println!("Embedding model set to {model:?} ({scope}).");
         }
     }
 
