@@ -2,6 +2,10 @@
 title: cargo-debrief
 summary: RAG-based code retrieval tool — AST-aware chunking and hybrid search for LLM context
 features:
+  - 🚧 Project Configuration
+    - 🚧 Shared Configuration (`.debrief/`)
+    - 🚧 Local Storage (`.git/debrief/`)
+    - 🚧 Global Configuration
   - 🚧 Code Indexing
     - 🚧 AST-Aware Chunking
     - 🚧 Cross-File Skeleton Assembly
@@ -17,6 +21,8 @@ features:
   - 🚧 Daemon Mode
   - 🚧 MCP Server
   - 🚧 Language Support
+  - 🚧 Dependency Indexing
+    - 🚧 Language-Specific Dependency Detection
 ---
 
 # cargo-debrief
@@ -25,6 +31,51 @@ A CLI tool providing RAG (Retrieval-Augmented Generation) over codebases.
 Parses source code into metadata-rich, AST-aware chunks, embeds them as
 vectors, and serves search with metadata-boosted scoring so LLMs receive
 only the relevant code fragments instead of entire files.
+
+## 🚧 Project Configuration
+
+Two-layer configuration model separating shared and local data.
+
+### 🚧 Shared Configuration (`.debrief/`)
+
+Git-tracked project configuration shared across the team.
+
+```
+.debrief/
+  config.toml           # language settings, chunking options
+```
+
+- Committed to the repository — all team members share the same settings.
+- Contains: language configuration, dependency include paths (shared),
+  embedding model preference, chunking options.
+- Analogous to `.vscode/settings.json`.
+
+### 🚧 Local Storage (`.git/debrief/`)
+
+Machine-local data not tracked by git. Stored inside `.git/` so it is
+automatically invisible to git status.
+
+```
+.git/debrief/
+  index.bin             # vector index (binary, large)
+  local-config.toml     # machine-specific overrides
+```
+
+- Contains: index files, local dependency paths, user-specific
+  overrides, cached embedding model reference.
+- Analogous to `.git/info/exclude`.
+- Index files and embedding model cache live here — they are
+  machine-specific and should never be committed.
+
+### 🚧 Global Configuration
+
+User-level defaults stored in a platform-standard config directory
+(e.g., `~/.config/debrief/`).
+
+- Global embedding model preference (`set-embedding-model --global`)
+- Default chunking options
+- Project-level config (`.debrief/config.toml`) overrides global.
+  Local config (`.git/debrief/local-config.toml`) overrides both.
 
 ## 🚧 Code Indexing
 
@@ -39,7 +90,7 @@ cargo debrief index [<path>]
 - `<path>` defaults to the current directory.
 - On first run, performs a full index of all supported source files.
 - On subsequent runs, performs incremental re-indexing (see below).
-- Index is stored on disk alongside the project (location TBD).
+- Index is stored in `.git/debrief/index.bin`.
 
 ### 🚧 AST-Aware Chunking
 
@@ -239,10 +290,13 @@ cargo debrief set-embedding-model [--global] <model-name>
 ```
 
 - On first use, the default model is automatically downloaded.
-- `--global` sets the model for all projects (user-level config).
-- Without `--global`, sets the model for the current project only.
-- Models are cached in a platform-standard user data directory.
-- Project-level config overrides global config.
+- `--global` sets the model in global config (`~/.config/debrief/`).
+- Without `--global`, sets the model in `.debrief/config.toml`
+  (shared with team).
+- Model binary files are cached in global data directory
+  (e.g., `~/.local/share/debrief/models/`). Never stored per-project.
+- Active model reference recorded in `.git/debrief/local-config.toml`.
+- Resolution order: local → project → global → default.
 
 > [!note] Constraints
 > - Changing the model invalidates the existing index — a full re-index
@@ -253,6 +307,7 @@ cargo debrief set-embedding-model [--global] <model-name>
 ## 🚧 Index Persistence
 
 The search index is serialized to disk for fast reload across sessions.
+Stored in `.git/debrief/` (local, not committed).
 
 - Format: bincode-serialized, with a version field in the header.
 - On version mismatch (e.g., after a tool upgrade), the index is
@@ -263,7 +318,7 @@ The search index is serialized to disk for fast reload across sessions.
 
 > [!note] Constraints
 > - No external database. The index is a single file (or small set of
->   files) stored locally.
+>   files) in `.git/debrief/`.
 > - Index size scales with codebase: ~60MB for ~20K chunks at 768
 >   dimensions.
 
@@ -308,3 +363,43 @@ Tree-sitter-based parsing with per-language grammar support.
 > - Initial release supports Rust only.
 > - Adding a language requires implementing the Chunker trait — there
 >   is no automatic/generic fallback chunking.
+
+## 🚧 Dependency Indexing
+
+Index public API skeletons of project dependencies for improved
+search coverage. Deferred — not part of initial implementation.
+
+```
+cargo debrief index . --with-deps
+```
+
+- Indexes **direct dependencies only** (not transitive).
+- **Skeleton only** — public type signatures, no function bodies.
+- Dependency chunks receive a lower base score than project code,
+  so project results always rank higher by default.
+
+### 🚧 Language-Specific Dependency Detection
+
+| Language | Auto-detection | Fallback |
+|----------|---------------|----------|
+| **Rust** | `cargo metadata` → dep locations + public API | — |
+| **C++** | `compile_commands.json` → include paths | `debrief dep cpp-include <path>` |
+| **Python** | Active venv `site-packages` + `.pyi` stubs | `debrief dep py-packages <venv-path>` |
+
+- Rust: fully automatic via `cargo metadata`. Rustdoc JSON output
+  may provide more accurate public API extraction than tree-sitter.
+- C++: `compile_commands.json` (generated by CMake) is the primary
+  source. Visual Studio `.vcxproj` parsing is possible but complex.
+  Manual fallback via CLI command for unsupported build systems.
+- Python: detect active virtualenv and index installed packages.
+  `.pyi` type stubs are preferred over source when available.
+
+Shared dependency paths go in `.debrief/config.toml` (git-tracked).
+Machine-specific paths go in `.git/debrief/local-config.toml`.
+
+> [!note] Constraints
+> - Dependency skeletons can add ~5K-10K chunks to the index.
+>   At project scale (~20K total) this is within hnsw_rs capacity.
+> - Proc macro generated APIs are not visible to tree-sitter and
+>   will not be indexed.
+> - Deferred until core project-code search quality is validated.
