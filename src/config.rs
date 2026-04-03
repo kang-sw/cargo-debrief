@@ -36,6 +36,9 @@ impl Config {
 
 /// Discover the git repository root by walking parent directories
 /// looking for a `.git` directory.
+///
+/// Note: only detects `.git` as a directory. Git worktrees and submodules
+/// use a `.git` file instead — not supported yet.
 fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut current = start;
     loop {
@@ -87,22 +90,22 @@ fn load_layer(path: &Path) -> Result<Option<Config>> {
 pub fn load_config(paths: &ConfigPaths) -> Result<Config> {
     let mut config = Config::default();
 
-    if let Some(ref path) = paths.global {
-        if let Some(layer) = load_layer(path)? {
-            config.merge(layer);
-        }
+    if let Some(ref path) = paths.global
+        && let Some(layer) = load_layer(path)?
+    {
+        config.merge(layer);
     }
 
-    if let Some(ref path) = paths.project {
-        if let Some(layer) = load_layer(path)? {
-            config.merge(layer);
-        }
+    if let Some(ref path) = paths.project
+        && let Some(layer) = load_layer(path)?
+    {
+        config.merge(layer);
     }
 
-    if let Some(ref path) = paths.local {
-        if let Some(layer) = load_layer(path)? {
-            config.merge(layer);
-        }
+    if let Some(ref path) = paths.local
+        && let Some(layer) = load_layer(path)?
+    {
+        config.merge(layer);
     }
 
     Ok(config)
@@ -204,5 +207,23 @@ mod tests {
         let config = load_config(&paths)?;
         assert!(config.embedding_model.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn load_config_malformed_toml_reports_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_file = dir.path().join("bad.toml");
+        fs::write(&bad_file, "not valid toml [[[").unwrap();
+
+        let paths = ConfigPaths {
+            global: Some(bad_file.clone()),
+            project: None,
+            local: None,
+        };
+        let err = load_config(&paths).unwrap_err();
+        assert!(
+            err.to_string().contains("bad.toml"),
+            "error should mention file path: {err}"
+        );
     }
 }

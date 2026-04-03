@@ -24,6 +24,8 @@ pub struct SearchResult {
 ///
 /// Phase 1: [`InProcessService`] executes everything in-process.
 /// Phase 2: `DaemonClient` will send requests over IPC to a background daemon.
+///
+/// Not object-safe (uses RPITIT). Dispatch is monomorphized at compile time.
 pub trait DebriefService {
     fn index(&self, path: &Path) -> impl Future<Output = Result<IndexResult>> + Send;
 
