@@ -42,25 +42,48 @@ Cargo.toml). This reduces indexing time for the larger batch counts.
 
 ## Phase 2 — P1: Micro-Chunk Merging
 
-Flag-heavy files (e.g., ripgrep's `defs.rs`, 7.8K lines) produce
-hundreds of 2-3 line chunks — one per `impl Flag for X` single-method
-block. These crowd search results with low-information content.
+Full-repo eval (3070 chunks, 100 files) confirmed micro-chunk problem:
+S1 "Searcher" regressed from 0.90 to 0.77 (overview diluted by method
+chunks), T3 "printer output formatting" failed 0/3 (same cause).
+Flag-heavy files remain the primary offender.
 
-**Approach options (evaluate at plan time):**
+**Chosen approach: minimum body threshold with overview inlining.**
 
-1. **Minimum chunk size threshold** — skip or merge chunks below N
-   lines into the parent overview chunk.
-2. **Same-type consecutive impl merging** — if multiple `impl T`
-   blocks for the same type are adjacent, merge into one function chunk.
-3. **De-duplicate near-identical short methods** — detect accessor
-   patterns (`fn name_long() -> &str { "foo" }`) and collapse.
+`const MIN_METHOD_CHUNK_LINES: usize = 5;`
 
-Option 1 is simplest and addresses the symptom directly.
+Methods ≤ threshold: full body inlined in type overview chunk, no
+separate function chunk generated. Methods > threshold: signature in
+overview, separate function chunk (current behavior).
+
+Changes in `chunker/rust.rs`:
+
+1. `build_overview_chunk()` — for small methods, use full text instead
+   of `signature_without_body()` in the overview's impl block rendering.
+2. `into_chunks()` — skip `build_method_chunk()` for methods below
+   threshold.
+
+**Module overview chunk (new).** Free functions currently have no
+parent to merge into. Add a per-file module overview chunk:
+
+- Aggregates small free functions (≤ threshold) as full bodies
+- Large free functions as signatures only (function chunk still generated)
+- `symbol_name`: module path (e.g., `defs`)
+- `kind`: `ChunkKind::Module` (new variant)
+- `chunk_type`: `ChunkType::Overview`
+- `parent`: `None`
+
+This also creates a searchable module-level entry that describes
+"what's in this file" — improves structural query matching.
+
+**Chunk model change:** Add `ChunkKind::Module` variant to `chunk.rs`.
+Bump `INDEX_VERSION`.
 
 ### Success criteria
 
 - `defs.rs` produces fewer than 50 chunks (currently ~266 per file avg)
-- "command line argument parsing" query returns structural results
+- "Searcher" query top-1 score recovers to > 0.85
+- "printer output formatting" returns `Standard<W>` in top-3
+- "command line argument parsing" returns structural results
   (Flag trait overview, HiArgs) not micro-impl accessors
 
 ## Phase 3 — P2 + P3: Overview Ordering + Progress Feedback
@@ -86,14 +109,43 @@ Output to stderr to keep stdout clean for piping.
 - `overview src/standard.rs` shows `Standard<W>` before `Config`
 - `rebuild-index` on ripgrep shows per-file or per-batch progress
 
+### Result (b58d6f8) — 26-04-04
+
+Phase 1 implemented: batch split (64 chunks per `embed_batch` call) +
+GPU execution provider registration (CoreML/CUDA behind feature flags)
++ progress dots to stderr.
+
+**GPU/CoreML memory issue discovered:** `cargo-debrief-gpu rebuild-index`
+on full ripgrep consumed 41 GB RSS before being killed. The CoreML
+execution provider appears to accumulate memory across batches rather
+than releasing intermediate state. CPU-only path unaffected.
+`gpu` feature flag should carry a warning until this is investigated.
+Possible causes: ort 2.0-rc CoreML binding leak, CoreML compilation
+cache, or macOS unified memory accounting.
+
+Full ripgrep CPU result: **3070 chunks, 100 files, 9m37s** — no crash.
+Previous chunk estimate (~26K) was wrong — based on 5-file subset of
+largest files. Real average is ~30 chunks/file, not 266.
+
+Search quality: 15/24 (62.5%) vs baseline 14/24 (58%).
+R1, R2 improved (more files indexed). S1, T3 regressed (micro-chunk
+dilution — addressed by Phase 2).
+
+GPU/CoreML: SIGTERM at 4m25s with "Context leak detected" warnings.
+CoreML EP not releasing Neural Engine context between batches.
+Theoretical 2.17x speedup if stable, but unusable as-is.
+
 ## Known Limitations (Not Addressed)
 
 **Structural semantic queries** (e.g., "how does argument parsing work")
 perform poorly. This is a fundamental limitation of small embedding
 models (137M-335M params) which embed tokens, not architectural concepts.
 Potential future mitigations:
-- BM25 hybrid search (keyword matching)
-- LLM-generated chunk summaries at index time
+- LLM-generated chunk summaries at index time (`260404-feat-llm-chunk-summarization`)
 - Larger code-specialized embedding models
 
-Documented as a known constraint, not a bug.
+**CoreML GPU acceleration** causes excessive memory usage (41 GB for
+26K chunks). The `gpu` feature flag is not safe for production use
+until the ort CoreML EP memory behavior is investigated.
+
+Documented as known constraints, not bugs.

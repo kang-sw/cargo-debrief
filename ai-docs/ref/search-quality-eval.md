@@ -129,3 +129,34 @@ Notes:
 - Subset test only. Full-repo baseline pending P0 fix.
 - R2 failure is coverage gap, not search quality issue.
 - R1 failure is micro-chunk problem (P1) + embedding model limitation.
+
+## Run: 2026-04-04 — Full ripgrep, post-P0 batch split fix
+
+Model: nomic-embed-text-v1.5
+Chunker: no changes from baseline
+Index: 3070 chunks, 100 files (CPU, 9m37s)
+
+| ID | Query                           | Top-1 Score | Top-3 Rel | Pass |
+|----|---------------------------------|-------------|-----------|------|
+| S1 | Searcher                        | 0.7695      | 3/3       | N    |
+| S2 | BufReader                       | 0.4966      | 0/3       | Y    |
+| T1 | ignore rules and gitignore      | 0.7881      | 3/3       | Y    |
+| T2 | file searching and filtering    | 0.7040      | 2/3       | Y    |
+| T3 | printer output formatting       | 0.6034      | 0/3       | N    |
+| R1 | command line argument parsing   | 0.6184      | 1/3       | Y    |
+| R2 | parallel directory walking      | 0.6495      | 3/3       | Y    |
+| G1 | regex pattern matching          | 0.6985      | 3/3       | Y    |
+
+Aggregate:
+- Overall relevance: 15/24 (62.5%)
+- Symbol accuracy: 1/2
+- Semantic accuracy: 3/4
+- Structural accuracy: 2/2
+
+Notes:
+- P0 fix validated: full repo indexes without crash (3070 chunks, not ~26K as estimated).
+- R1, R2 improved: index now includes parse.rs, config.rs, walk.rs.
+- S1 regressed: overview chunk diluted by more `impl Searcher` method chunks (0.90 → 0.77).
+- T3 regressed: micro-chunk competition worse with full index.
+- S1, T3 failures are P1 micro-chunk merging targets.
+- GPU/CoreML: SIGTERM at 4m25s, "Context leak" — not production-ready.
