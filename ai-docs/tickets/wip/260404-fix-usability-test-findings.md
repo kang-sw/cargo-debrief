@@ -143,6 +143,23 @@ cargo-brief output format comparison.
 - `overview src/standard.rs` shows `Standard<W>` before `Config`
 - Search results include module path context line
 
+### Result (3151029) — 26-04-04
+
+Phase 3 implemented across two sub-tasks:
+
+**P2 (overview ordering):** Overview chunks sorted by visibility —
+`Pub` → `PubCrate` → `PubSuper` → `Private`. Stable sort preserves
+file order within each tier.
+
+**P4 (search module context):** `SearchResult` gains `module_path`
+field, populated by `extract_module_path()` parsing `embedding_text`
+first line. CLI prints `// in {module}` before each result's
+display_text. Code review caught wrong `strip_prefix` (`"/ "` vs
+`"// "`) — fixed before merge (8178e03). 3 unit tests added for
+`extract_module_path`.
+
+**Success criteria evaluation pending** — requires ripgrep test run.
+
 ## Known Limitations (Not Addressed)
 
 **Structural semantic queries** (e.g., "how does argument parsing work")
