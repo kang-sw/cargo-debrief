@@ -2,8 +2,6 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::config::Config;
-
 /// Result of an indexing operation.
 #[derive(Debug)]
 pub struct IndexResult {
@@ -22,56 +20,99 @@ pub struct SearchResult {
 
 /// Service boundary between CLI and core logic.
 ///
+/// Each method receives `project_root` explicitly, enabling a single
+/// daemon instance to serve multiple workspaces without a separate
+/// routing/multiplexing layer.
+///
 /// Phase 1: [`InProcessService`] executes everything in-process.
-/// Phase 2: `DaemonClient` will send requests over IPC to a background daemon.
+/// Phase 2: `DaemonClient` will send requests over IPC to a background daemon,
+/// including `project_root` in each request.
 ///
 /// Not object-safe (uses RPITIT). Dispatch is monomorphized at compile time.
 pub trait DebriefService {
-    fn index(&self, path: &Path) -> impl Future<Output = Result<IndexResult>> + Send;
+    fn index(
+        &self,
+        project_root: &Path,
+        path: &Path,
+    ) -> impl Future<Output = Result<IndexResult>> + Send;
 
     fn search(
         &self,
+        project_root: &Path,
         query: &str,
         top_k: usize,
     ) -> impl Future<Output = Result<Vec<SearchResult>>> + Send;
 
-    fn get_skeleton(&self, file: &Path) -> impl Future<Output = Result<String>> + Send;
+    fn get_skeleton(
+        &self,
+        project_root: &Path,
+        file: &Path,
+    ) -> impl Future<Output = Result<String>> + Send;
 
     fn set_embedding_model(
         &self,
+        project_root: &Path,
         model: &str,
         global: bool,
     ) -> impl Future<Output = Result<()>> + Send;
 }
 
 /// In-process service implementation. Executes all operations directly
-/// in the CLI process without a daemon.
-pub struct InProcessService {
-    #[allow(dead_code)]
-    config: Config,
-}
+/// in the CLI process without a daemon. Config is resolved from the
+/// `project_root` on each call.
+pub struct InProcessService;
 
 impl InProcessService {
-    pub fn new(config: Config) -> Self {
-        Self { config }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for InProcessService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl DebriefService for InProcessService {
-    async fn index(&self, path: &Path) -> Result<IndexResult> {
-        anyhow::bail!("not yet implemented: index {}", path.display())
+    async fn index(&self, project_root: &Path, path: &Path) -> Result<IndexResult> {
+        anyhow::bail!(
+            "not yet implemented: index {} (root: {})",
+            path.display(),
+            project_root.display()
+        )
     }
 
-    async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
-        anyhow::bail!("not yet implemented: search {query:?} (top_k={top_k})")
+    async fn search(
+        &self,
+        project_root: &Path,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>> {
+        anyhow::bail!(
+            "not yet implemented: search {query:?} (top_k={top_k}, root: {})",
+            project_root.display()
+        )
     }
 
-    async fn get_skeleton(&self, file: &Path) -> Result<String> {
-        anyhow::bail!("not yet implemented: get-skeleton {}", file.display())
+    async fn get_skeleton(&self, project_root: &Path, file: &Path) -> Result<String> {
+        anyhow::bail!(
+            "not yet implemented: get-skeleton {} (root: {})",
+            file.display(),
+            project_root.display()
+        )
     }
 
-    async fn set_embedding_model(&self, model: &str, global: bool) -> Result<()> {
-        anyhow::bail!("not yet implemented: set-embedding-model {model:?} (global={global})")
+    async fn set_embedding_model(
+        &self,
+        project_root: &Path,
+        model: &str,
+        global: bool,
+    ) -> Result<()> {
+        anyhow::bail!(
+            "not yet implemented: set-embedding-model {model:?} (global={global}, root: {})",
+            project_root.display()
+        )
     }
 }
 
@@ -81,24 +122,45 @@ mod tests {
 
     #[tokio::test]
     async fn in_process_service_stubs_return_errors() {
-        let service = InProcessService::new(Config::default());
+        let service = InProcessService::new();
+        let root = Path::new(".");
 
-        let err = service.index(Path::new(".")).await.unwrap_err();
+        let err = service.index(root, Path::new(".")).await.unwrap_err();
         assert!(err.to_string().contains("not yet implemented"));
 
-        let err = service.search("foo", 10).await.unwrap_err();
+        let err = service.search(root, "foo", 10).await.unwrap_err();
         assert!(err.to_string().contains("not yet implemented"));
 
         let err = service
-            .get_skeleton(Path::new("src/main.rs"))
+            .get_skeleton(root, Path::new("src/main.rs"))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not yet implemented"));
 
         let err = service
-            .set_embedding_model("test", false)
+            .set_embedding_model(root, "test", false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not yet implemented"));
+    }
+
+    #[tokio::test]
+    async fn in_process_service_different_roots_are_independent() {
+        let service = InProcessService::new();
+
+        let err_a = service
+            .index(Path::new("/tmp/project-a"), Path::new("."))
+            .await
+            .unwrap_err();
+        let err_b = service
+            .index(Path::new("/tmp/project-b"), Path::new("."))
+            .await
+            .unwrap_err();
+
+        // Both are stub errors; roots are passed through independently.
+        assert!(err_a.to_string().contains("not yet implemented"));
+        assert!(err_b.to_string().contains("not yet implemented"));
+        assert!(err_a.to_string().contains("project-a"));
+        assert!(err_b.to_string().contains("project-b"));
     }
 }
