@@ -339,18 +339,24 @@ Stored in `.git/debrief/` (local, not committed).
 ## 🚧 Daemon Mode
 
 Background service that keeps the index loaded in memory for fast
-repeated queries. Phase 2 — not part of initial implementation.
+repeated queries. **Default execution mode** — CLI connects to the
+daemon for all operations. In-process mode is the fallback when the
+daemon is unavailable.
 
 - First CLI invocation transparently spawns the daemon if not running.
 - Daemon serves all CLI requests on the machine (per-machine singleton).
+- A single daemon instance serves **multiple workspaces** — each
+  request carries the project root, and the daemon manages per-workspace
+  state internally.
 - Auto-expires after a configurable idle timeout.
 - CLI detects daemon availability and falls back to in-process mode
-  if the daemon is not running.
+  if the daemon is not running or cannot be spawned.
 
 > [!note] Constraints
 > - IPC mechanism TBD (Unix domain socket, named pipe, or localhost HTTP).
 > - Phase 1 uses in-process execution (no daemon). The `DebriefService`
->   trait abstracts the transport so the switch is transparent.
+>   trait accepts a project root per operation, so the switch to daemon
+>   mode is transparent — daemon simply routes by project root internally.
 
 ## 🚧 MCP Server
 
