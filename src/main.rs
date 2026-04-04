@@ -13,8 +13,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Index a codebase for search
-    Index {
+    /// Perform a manual full re-index of the codebase (normally implicit)
+    #[command(name = "rebuild-index")]
+    RebuildIndex {
         /// Path to index (defaults to current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -28,7 +29,7 @@ enum Command {
         top_k: usize,
     },
     /// Show file-level overview (declarations and signatures only)
-    GetSkeleton {
+    Overview {
         /// Source file path
         file: PathBuf,
     },
@@ -50,7 +51,7 @@ async fn main() -> Result<()> {
     let service = InProcessService::new();
 
     match cli.command {
-        Command::Index { path } => {
+        Command::RebuildIndex { path } => {
             let result = service.index(&project_root, &path).await?;
             println!(
                 "Indexed {} files, {} chunks created.",
@@ -72,8 +73,8 @@ async fn main() -> Result<()> {
                 println!();
             }
         }
-        Command::GetSkeleton { file } => {
-            let skeleton = service.get_skeleton(&project_root, &file).await?;
+        Command::Overview { file } => {
+            let skeleton = service.overview(&project_root, &file).await?;
             println!("{skeleton}");
         }
         Command::SetEmbeddingModel { model, global } => {

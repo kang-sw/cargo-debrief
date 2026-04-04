@@ -48,7 +48,7 @@ pub trait DebriefService {
         top_k: usize,
     ) -> impl Future<Output = Result<Vec<SearchResult>>> + Send;
 
-    fn get_skeleton(
+    fn overview(
         &self,
         project_root: &Path,
         file: &Path,
@@ -100,9 +100,9 @@ impl DebriefService for InProcessService {
         )
     }
 
-    async fn get_skeleton(&self, project_root: &Path, file: &Path) -> Result<String> {
+    async fn overview(&self, project_root: &Path, file: &Path) -> Result<String> {
         anyhow::bail!(
-            "not yet implemented: get-skeleton {} (root: {})",
+            "not yet implemented: overview {} (root: {})",
             file.display(),
             project_root.display()
         )
@@ -159,7 +159,7 @@ mod tests {
         assert!(err.to_string().contains("not yet implemented"));
 
         let err = service
-            .get_skeleton(root, Path::new("src/main.rs"))
+            .overview(root, Path::new("src/main.rs"))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not yet implemented"));
