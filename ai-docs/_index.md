@@ -11,7 +11,7 @@ src/
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
   deps.rs       — Dependency discovery (cargo metadata, BFS root-dep)
-  service.rs    — DebriefService trait (async RPITIT, project_root per method) + InProcessService (zero-sized)
+  service.rs    — DebriefService trait + InProcessService + DaemonClient + Service enum dispatch
   chunk.rs      — Chunk data model (Chunk, ChunkMetadata, ChunkKind, ChunkType, Visibility)
   chunker/      — Chunker trait + RustChunker (tree-sitter AST-aware chunking)
     mod.rs      — Chunker trait definition
@@ -20,7 +20,12 @@ src/
   store.rs      — Index serialization (IndexData + DepsIndexData, bincode + versioned header)
   embedder.rs   — ONNX Runtime embedding: ModelRegistry, Embedder (load, embed_batch, mean pooling + L2 norm)
   search.rs     — Vector search: SearchIndex (hnsw_rs ANN + symbol-name metadata boosting)
-  daemon.rs     — (Phase 2) daemon mode via CLI subcommand
+  daemon.rs     — Daemon process lifecycle, PID management, idle timeout, binary identity guard
+  ipc/          — Platform-abstracted IPC (Unix FIFO + Windows atomic-rename)
+    mod.rs      — cfg-gated re-exports
+    protocol.rs — DaemonRequest/Response, length-prefixed JSON framing
+    unix.rs     — FIFO transport, poll(2), flock serialization
+    windows.rs  — Atomic-rename transport, file polling, LockFileEx
 ```
 
 CLI dispatches through `DebriefService` trait. Phase 1 uses `InProcessService`
@@ -96,13 +101,15 @@ See `ai-docs/mental-model/` for operational knowledge:
 - `embedder.md` — ModelRegistry, Embedder, ONNX inference, model download
 - `search.md` — SearchIndex, hnsw_rs ANN, metadata boosting
 - `deps.md` — cargo metadata discovery, BFS root-dep computation, DepPackageInfo contract
+- `daemon.md` — daemon lifecycle, PID lock, idle timeout, async/sync bridge
+- `ipc.md` — platform IPC abstraction, protocol, flock contract
 
 ## Post-MVP Roadmap
 
 ```
 A✓ Usability test (ripgrep)        — validate search quality on real codebase
 C✓ Dependency chunking             — index transitive deps, public API only
-D* Daemon mode                     — per-workspace, temp-file RPC, ~3 min idle
+D~ Daemon mode (2A+2B done, 2C pending) — per-workspace, FIFO/file RPC, ~3 min idle
 E  LLM chunk summarization         — external LLM for embedding text enrichment
 B  Rust chunking population        — additional node kinds, informed by A results
 D  C++/Python chunkers             — language expansion
@@ -131,3 +138,5 @@ Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunkin
 - Dependency Chunking Phase 1: ChunkOrigin enum on Chunk (Project | Dependency), new deps.rs module (cargo metadata + BFS root-dep discovery), INDEX_VERSION 4. GPU bug split to separate ticket.
 - Dependency Chunking Phase 2: DepsIndexData in store.rs (DEPS_INDEX_VERSION 1, Cargo.lock hash staleness). Embedder refactored to param-passing. run_deps_index pipeline: walk dep src/, pub-filter, [dependency] tag annotation, 64-chunk batch embedding, deps-index.bin. Wired into index + search (data unused until Phase 3).
 - Dependency Chunking Phase 3: Unified search (project + dep chunks in single SearchIndex), DEP_ORIGIN_PENALTY 0.1, --no-deps CLI flag, dep_overview + --dep on overview, config exclude list, [dep: crate_name] output label. Spec updated, 🚧 removed from Dependency Indexing.
+- MCP server mode removed from spec and docs (user decision: will not be implemented).
+- Daemon Mode Phase 2A+2B: daemon.rs (lifecycle, PID flock, 3-min idle, debug binary guard), ipc/ module (Unix FIFO + Windows atomic-rename, length-prefixed JSON, flock client serialization), DaemonClient + Service enum in service.rs, daemon status/stop + hidden __daemon in main.rs. Auto-spawn deferred to Phase 2C.
