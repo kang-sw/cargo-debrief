@@ -32,7 +32,7 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 - **CLI-first with per-workspace daemon**: Primary interface is CLI.
   Per-workspace daemon lazy-spawned on first use, ~3 min idle expiry.
   Holds ONNX session + HNSW index in memory (eliminates 2-4s startup).
-  Temp-file-based RPC for sandbox compatibility. MCP layered later.
+  Temp-file-based RPC for sandbox compatibility.
 - **No external DB**: vectors stored in-memory as `Vec<[f32; N]>`, serialized
   to disk with bincode (versioned format).
 - **Vector search + metadata boosting**: cosine similarity with hnsw_rs,

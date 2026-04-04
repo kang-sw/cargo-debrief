@@ -98,4 +98,3 @@ when starting Phase 2B.
 - Index freshness in daemon: poll git HEAD on each request? Or rely on
   client to signal staleness?
 - Concurrency: single-threaded tokio sufficient for per-workspace use?
-- MCP server mode: layer on daemon later as optional interface?

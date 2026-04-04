@@ -25,7 +25,6 @@ features:
     - Scale
   - Index Persistence
   - 🚧 Daemon Mode
-  - 🚧 MCP Server
   - 🚧 Language Support
   - Dependency Indexing
     - Dependency Search Integration
@@ -512,17 +511,6 @@ the daemon is unavailable.
 >   trait accepts a project root per operation, so the switch to daemon
 >   mode is transparent.
 > - Temp-file RPC protocol details TBD.
-
-## 🚧 MCP Server
-
-MCP (Model Context Protocol) server exposing the same capabilities as
-the CLI for direct LLM integration. Deferred beyond Phase 2.
-
-- Will be layered on the daemon as an additional interface.
-- Planned tools: `search_code`, `overview`, `index_project`.
-
-> [!note] Constraints
-> - MCP SDK choice deferred. Will evaluate when implementation begins.
 
 ## 🚧 Language Support
 
