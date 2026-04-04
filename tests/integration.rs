@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use cargo_debrief::{
     chunk::Chunk,
@@ -497,4 +498,83 @@ fn git_tracked_rs_files_all_chunk_successfully() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: daemon lifecycle — spawn, status, stop
+// ---------------------------------------------------------------------------
+
+/// Integration test for daemon process lifecycle.
+/// Spawns the daemon binary, sends status + stop requests via IPC.
+#[test]
+fn daemon_spawn_status_stop() {
+    use cargo_debrief::ipc;
+    use cargo_debrief::ipc::protocol::{DaemonRequest, DaemonResponse};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+
+    // Daemon dir path
+    let daemon_dir = dir.path().join(".git").join("debrief").join("daemon");
+
+    let bin = env!("CARGO_BIN_EXE_cargo-debrief");
+
+    // Spawn daemon
+    let mut child = Command::new(bin)
+        .args(["__daemon", "--project-root", dir.path().to_str().unwrap()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .env("CARGO_DEBRIEF_DAEMON_TIMEOUT", "10") // short timeout for test
+        .spawn()
+        .expect("spawn daemon");
+
+    // Wait for readiness indicator
+    let ready = ipc::ready_indicator(&daemon_dir);
+    let start = Instant::now();
+    while !ready.exists() {
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("daemon did not become ready within 10s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Send status request
+    let response = ipc::send_command(&daemon_dir, DaemonRequest::Status, Duration::from_secs(5))
+        .expect("status request");
+
+    match response {
+        DaemonResponse::Status { pid, uptime_secs } => {
+            assert_eq!(pid, child.id(), "PID should match spawned process");
+            assert!(uptime_secs < 60, "uptime should be small");
+        }
+        other => panic!("expected Status response, got: {other:?}"),
+    }
+
+    // Send stop request
+    let response = ipc::send_command(&daemon_dir, DaemonRequest::Stop, Duration::from_secs(5))
+        .expect("stop request");
+
+    match response {
+        DaemonResponse::Ok { message } => {
+            assert_eq!(message, "stopping");
+        }
+        other => panic!("expected Ok response, got: {other:?}"),
+    }
+
+    // Wait for process to exit
+    let status = child.wait().expect("wait for daemon exit");
+    assert!(status.success(), "daemon should exit cleanly");
+
+    // PID file should be cleaned up
+    assert!(
+        !daemon_dir.join("daemon.pid").exists(),
+        "PID file should be removed on clean shutdown"
+    );
 }

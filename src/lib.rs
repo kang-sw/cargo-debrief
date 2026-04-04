@@ -1,9 +1,11 @@
 pub mod chunk;
 pub mod chunker;
 pub mod config;
+pub mod daemon;
 pub mod deps;
 pub mod embedder;
 pub mod git;
+pub mod ipc;
 pub mod search;
 pub mod service;
 pub mod store;
