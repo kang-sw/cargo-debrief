@@ -24,8 +24,7 @@ features:
     - Behavior
     - Scale
   - Index Persistence
-  - 🚧 Daemon Mode
-  - 🚧 MCP Server
+  - Daemon Mode
   - 🚧 Language Support
   - Dependency Indexing
     - Dependency Search Integration
@@ -485,7 +484,7 @@ Stored in `.git/debrief/` (local, not committed).
 > - Index size scales with codebase: ~60MB for ~20K chunks at 768
 >   dimensions.
 
-## 🚧 Daemon Mode
+## Daemon Mode
 
 Per-workspace background process that keeps the ONNX model session and
 HNSW index loaded in memory, eliminating ~2-4 seconds of startup
@@ -493,36 +492,39 @@ overhead on repeated CLI calls. In-process mode is the fallback when
 the daemon is unavailable.
 
 - **Per-workspace.** One daemon per project root (not system-wide).
-- First CLI invocation transparently spawns the daemon if not running.
 - **~3 minute idle expiry.** Short lifespan — purpose is eliminating
   delay during burst usage (e.g., AI agent sessions), not long-term
-  persistence.
-- **Temp-file-based RPC.** Avoids sandbox restrictions that affect Unix
-  sockets and named pipes. Request/response via temp files in a known
-  directory.
-- **Discovery.** PID file in `.git/debrief/` (workspace-local).
-- CLI detects daemon availability and falls back to in-process mode
-  if the daemon is not running or cannot be spawned.
-- In debug builds, CLI compares binary identity with the running daemon
-  and kills/restarts on mismatch to prevent stale daemon processes
-  during development.
+  persistence. Configurable via `CARGO_DEBRIEF_DAEMON_TIMEOUT` (seconds).
+- **Platform-specific IPC.** Unix: FIFO pair + `flock` serialization.
+  Windows: atomic-rename file protocol + `LockFileEx` serialization.
+  Framing: 4-byte little-endian length prefix + JSON payload.
+- **Discovery.** PID file at `.git/debrief/daemon/daemon.pid`
+  (workspace-local). Advisory file lock prevents concurrent start races.
+- **Auto-spawn.** The first CLI invocation transparently spawns the daemon
+  if one is not already running. A progress indicator
+  (`spawning daemon.......done.`) is printed to stderr during readiness
+  polling.
+- **Fallback.** Any daemon error silently falls back to in-process service.
+  Stale PID files (dead processes) are automatically cleaned up.
+- In debug builds, CLI compares binary mtime with the running daemon
+  (`daemon.exe_mtime` marker) and force-kills stale daemons on mismatch.
+
+**Daemon CLI:**
+
+```
+cargo debrief daemon status
+cargo debrief daemon stop
+```
+
+- `daemon status`: reports whether the daemon is running, its PID, and
+  uptime in seconds. Queries via IPC if the daemon is alive.
+- `daemon stop`: sends a Stop request via IPC; falls back to force-kill
+  if IPC fails.
 
 > [!note] Constraints
-> - Phase 1 uses in-process execution (no daemon). The `DebriefService`
->   trait accepts a project root per operation, so the switch to daemon
->   mode is transparent.
-> - Temp-file RPC protocol details TBD.
-
-## 🚧 MCP Server
-
-MCP (Model Context Protocol) server exposing the same capabilities as
-the CLI for direct LLM integration. Deferred beyond Phase 2.
-
-- Will be layered on the daemon as an additional interface.
-- Planned tools: `search_code`, `overview`, `index_project`.
-
-> [!note] Constraints
-> - MCP SDK choice deferred. Will evaluate when implementation begins.
+> - IPC uses platform FIFOs (Unix) or atomic-rename files (Windows).
+>   Sandboxed environments that restrict named pipes may prevent daemon
+>   connectivity; in-process fallback still works in those cases.
 
 ## 🚧 Language Support
 

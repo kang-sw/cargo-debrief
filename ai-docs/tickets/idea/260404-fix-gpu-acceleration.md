@@ -77,10 +77,35 @@ Update `Embedder::load` and document the chosen approach.
   regression in embedding quality.
 - Remove the GPU feature flag warning from the README.
 
+## Experiment Results (2026-04-04)
+
+### ANE Disable Test
+- Changed `CoreML::default()` to `.with_compute_units(ComputeUnits::CPUAndGPU)` (no ANE)
+- Result: RSS still exploded to 110GB+ → OOM. **ANE is not the cause.**
+
+### Memory Behavior
+- RSS grows to 40-100GB+ **within seconds** of first `run()` call
+- This is NOT a gradual per-run leak — it is an instant allocation explosion
+- Suggests the issue is in CoreML model compilation or EP initialization,
+  not in per-inference context accumulation
+- ort 2.0.0-rc.12 is the latest available — no upgrade path
+
+### Session Recreation (Option A) — NOT YET TESTED
+- Planned: drop/recreate Session every N batches
+- Experiment was killed due to OOM before completion
+- Needs retry with RSS monitoring from the very first batch
+
+### Remaining Investigation
+- Add `dbg!`/RSS measurement around `with_execution_providers()` and
+  first `session.run()` to isolate whether leak is at EP registration,
+  model compilation, or first inference
+- Test `ComputeUnits::CPUOnly` to isolate CoreML EP vs ort general
+- Consider `ORT_LOG_LEVEL=verbose` for ONNX Runtime internal diagnostics
+
 ## Open Questions
 
 - Is the leak in ort's CoreML binding or in our session management?
-  (Phase 1 will answer this.)
+  Experiments suggest CoreML EP itself — our code follows standard patterns.
 - Does the CUDA path have similar lifecycle issues? (Untested.)
 - If CoreML remains unfixable, is `candle` + Metal a viable replacement
   for the ort ONNX pipeline, or does it require a new model format?

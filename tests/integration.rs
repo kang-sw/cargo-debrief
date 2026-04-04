@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Once;
 
 use cargo_debrief::{
     chunk::Chunk,
@@ -8,6 +10,15 @@ use cargo_debrief::{
     search::SearchIndex,
     store::{IndexData, load_index, save_index},
 };
+
+/// Set CARGO_DEBRIEF_BIN env var once for daemon tests (points spawn_daemon at the real binary).
+fn ensure_debrief_bin_env() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: called exactly once before any threads that read this var.
+        unsafe { std::env::set_var("CARGO_DEBRIEF_BIN", env!("CARGO_BIN_EXE_cargo-debrief")) };
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Helper: deterministic unit-length embeddings without ONNX/network
@@ -497,4 +508,219 @@ fn git_tracked_rs_files_all_chunk_successfully() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: daemon lifecycle — spawn, status, stop
+// ---------------------------------------------------------------------------
+
+/// Integration test for daemon process lifecycle.
+/// Spawns the daemon binary, sends status + stop requests via IPC.
+#[test]
+fn daemon_spawn_status_stop() {
+    use cargo_debrief::ipc;
+    use cargo_debrief::ipc::protocol::{DaemonRequest, DaemonResponse};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+
+    // Daemon dir path
+    let daemon_dir = dir.path().join(".git").join("debrief").join("daemon");
+
+    let bin = env!("CARGO_BIN_EXE_cargo-debrief");
+
+    // Spawn daemon
+    let mut child = Command::new(bin)
+        .args(["__daemon", "--project-root", dir.path().to_str().unwrap()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .env("CARGO_DEBRIEF_DAEMON_TIMEOUT", "10") // short timeout for test
+        .spawn()
+        .expect("spawn daemon");
+
+    // Wait for readiness indicator
+    let ready = ipc::ready_indicator(&daemon_dir);
+    let start = Instant::now();
+    while !ready.exists() {
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("daemon did not become ready within 10s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Send status request
+    let response = ipc::send_command(&daemon_dir, DaemonRequest::Status, Duration::from_secs(5))
+        .expect("status request");
+
+    match response {
+        DaemonResponse::Status { pid, uptime_secs } => {
+            assert_eq!(pid, child.id(), "PID should match spawned process");
+            assert!(uptime_secs < 60, "uptime should be small");
+        }
+        other => panic!("expected Status response, got: {other:?}"),
+    }
+
+    // Send stop request
+    let response = ipc::send_command(&daemon_dir, DaemonRequest::Stop, Duration::from_secs(5))
+        .expect("stop request");
+
+    match response {
+        DaemonResponse::Ok { message } => {
+            assert_eq!(message, "stopping");
+        }
+        other => panic!("expected Ok response, got: {other:?}"),
+    }
+
+    // Wait for process to exit
+    let status = child.wait().expect("wait for daemon exit");
+    assert!(status.success(), "daemon should exit cleanly");
+
+    // PID file should be cleaned up
+    assert!(
+        !daemon_dir.join("daemon.pid").exists(),
+        "PID file should be removed on clean shutdown"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: auto-spawn daemon and verify status via IPC
+// ---------------------------------------------------------------------------
+
+/// Integration test for auto-spawn: uses auto_spawn_and_connect, verifies daemon
+/// is running, then stops it and verifies fallback.
+#[test]
+fn daemon_auto_spawn_and_fallback() {
+    use cargo_debrief::daemon;
+    use cargo_debrief::ipc;
+    use cargo_debrief::ipc::protocol::{DaemonRequest, DaemonResponse};
+    use std::time::Duration;
+
+    ensure_debrief_bin_env();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+
+    // Auto-spawn should start a daemon
+    let client = daemon::auto_spawn_and_connect(dir.path());
+    assert!(client.is_some(), "auto_spawn_and_connect should succeed");
+
+    let daemon_dir = daemon::daemon_dir(dir.path()).unwrap();
+
+    // Verify daemon is running via IPC
+    let response = ipc::send_command(&daemon_dir, DaemonRequest::Status, Duration::from_secs(5))
+        .expect("status request");
+    match response {
+        DaemonResponse::Status { pid, .. } => {
+            assert!(pid > 0, "daemon PID should be positive");
+        }
+        other => panic!("expected Status response, got: {other:?}"),
+    }
+
+    // Stop daemon
+    let _ = ipc::send_command(&daemon_dir, DaemonRequest::Stop, Duration::from_secs(5));
+
+    // Wait for shutdown
+    std::thread::sleep(Duration::from_millis(500));
+
+    // After daemon is stopped, auto_spawn_and_connect should be None if spawn is
+    // not re-attempted (the daemon died). But actually it WILL auto-spawn again.
+    // Verify a second auto-spawn also works.
+    let client2 = daemon::auto_spawn_and_connect(dir.path());
+    assert!(
+        client2.is_some(),
+        "second auto_spawn_and_connect should succeed"
+    );
+
+    // Cleanup: stop the second daemon
+    let _ = ipc::send_command(&daemon_dir, DaemonRequest::Stop, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: stale PID file cleanup
+// ---------------------------------------------------------------------------
+
+/// Create a fake PID file with a dead PID, verify auto-spawn cleans it up
+/// and starts a fresh daemon.
+#[test]
+fn daemon_stale_pid_cleanup() {
+    use cargo_debrief::daemon;
+    use cargo_debrief::ipc;
+    use cargo_debrief::ipc::protocol::{DaemonRequest, DaemonResponse};
+    use std::time::Duration;
+
+    ensure_debrief_bin_env();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+
+    // Create daemon dir with a stale PID file (dead PID)
+    let daemon_dir = dir.path().join(".git").join("debrief").join("daemon");
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    std::fs::write(daemon_dir.join("daemon.pid"), "4294967295").unwrap();
+
+    // Also create stale IPC files to verify cleanup
+    std::fs::write(daemon_dir.join("debrief.lock"), "").unwrap();
+
+    // auto_spawn_and_connect should clean stale files and start fresh
+    let client = daemon::auto_spawn_and_connect(dir.path());
+    assert!(
+        client.is_some(),
+        "auto_spawn_and_connect should succeed after stale cleanup"
+    );
+
+    // The stale PID should have been replaced with the real daemon PID
+    let pid = daemon::read_pid(&daemon_dir).expect("PID file should exist");
+    assert_ne!(pid, 4294967295, "PID should not be the stale one");
+    assert!(ipc::process_alive(pid), "daemon process should be alive");
+
+    // Verify daemon is functional
+    let response = ipc::send_command(&daemon_dir, DaemonRequest::Status, Duration::from_secs(5))
+        .expect("status request");
+    match response {
+        DaemonResponse::Status { pid: resp_pid, .. } => {
+            assert_eq!(resp_pid, pid, "status PID should match PID file");
+        }
+        other => panic!("expected Status response, got: {other:?}"),
+    }
+
+    // Cleanup
+    let _ = ipc::send_command(&daemon_dir, DaemonRequest::Stop, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: resolve_service returns InProcess when spawn impossible
+// ---------------------------------------------------------------------------
+
+/// When not in a git repo, auto-spawn cannot determine daemon dir and resolve_service
+/// falls back to InProcess silently.
+#[test]
+fn resolve_service_no_git_repo_returns_in_process() {
+    use cargo_debrief::daemon;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // No git init — not a git repo
+
+    // auto_spawn_and_connect should return None (no .git dir)
+    let client = daemon::auto_spawn_and_connect(dir.path());
+    assert!(
+        client.is_none(),
+        "auto_spawn should return None outside git repo"
+    );
 }

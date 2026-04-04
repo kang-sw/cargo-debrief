@@ -14,14 +14,14 @@ use crate::{
 };
 
 /// Result of an indexing operation.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct IndexResult {
     pub files_indexed: usize,
     pub chunks_created: usize,
 }
 
 /// A single search result with relevance score.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub file_path: String,
     pub line_range: (usize, usize),
@@ -639,6 +639,212 @@ impl DebriefService for InProcessService {
         }
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DaemonClient — IPC-based service implementation
+// ---------------------------------------------------------------------------
+
+/// Client that communicates with a running daemon process via IPC.
+/// Implements `DebriefService` by serializing requests and deserializing responses.
+pub struct DaemonClient {
+    daemon_dir: std::path::PathBuf,
+    timeout: std::time::Duration,
+}
+
+impl DaemonClient {
+    /// Connect to an existing daemon for the given project root.
+    /// Returns `None` if no daemon is running.
+    pub fn connect(project_root: &Path) -> Option<Self> {
+        let dir = crate::daemon::daemon_dir(project_root).ok()?;
+        if !crate::daemon::is_daemon_running(&dir) {
+            return None;
+        }
+
+        // Debug builds: check binary identity to detect stale daemon after recompile.
+        if !crate::daemon::check_binary_identity(&dir) {
+            eprintln!("[daemon] binary mismatch, killing stale daemon");
+            crate::daemon::kill_stale_daemon(&dir);
+            return None;
+        }
+
+        let ready = crate::ipc::ready_indicator(&dir);
+        if !ready.exists() {
+            return None;
+        }
+
+        Some(Self {
+            daemon_dir: dir,
+            timeout: std::time::Duration::from_secs(120),
+        })
+    }
+
+    fn send(
+        &self,
+        request: crate::ipc::protocol::DaemonRequest,
+    ) -> Result<crate::ipc::protocol::DaemonResponse> {
+        crate::ipc::send_command(&self.daemon_dir, request, self.timeout)
+    }
+}
+
+impl DebriefService for DaemonClient {
+    async fn index(&self, _project_root: &Path, path: &Path) -> Result<IndexResult> {
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::Index {
+            path: path.to_path_buf(),
+        })? {
+            DaemonResponse::IndexResult(r) => Ok(r),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        }
+    }
+
+    async fn search(
+        &self,
+        _project_root: &Path,
+        query: &str,
+        top_k: usize,
+        include_deps: bool,
+    ) -> Result<Vec<SearchResult>> {
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::Search {
+            query: query.to_string(),
+            top_k,
+            include_deps,
+        })? {
+            DaemonResponse::SearchResults { results } => Ok(results),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        }
+    }
+
+    async fn overview(&self, _project_root: &Path, file: &Path) -> Result<String> {
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::Overview {
+            file: file.to_path_buf(),
+        })? {
+            DaemonResponse::Overview { content } => Ok(content),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        }
+    }
+
+    async fn dep_overview(&self, _project_root: &Path, crate_name: &str) -> Result<String> {
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::DepOverview {
+            crate_name: crate_name.to_string(),
+        })? {
+            DaemonResponse::Overview { content } => Ok(content),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        }
+    }
+
+    async fn set_embedding_model(
+        &self,
+        _project_root: &Path,
+        model: &str,
+        global: bool,
+    ) -> Result<()> {
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::SetEmbeddingModel {
+            model: model.to_string(),
+            global,
+        })? {
+            DaemonResponse::Ok { .. } => Ok(()),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response: {other:?}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service — dispatch with daemon-first fallback to InProcess
+// ---------------------------------------------------------------------------
+
+/// Unified service dispatch: tries daemon first, falls back to in-process
+/// on any IPC transport failure (R6/R8/R10).
+pub struct Service {
+    daemon: Option<DaemonClient>,
+    in_process: InProcessService,
+}
+
+impl Service {
+    /// Create a service with both daemon and in-process backends.
+    /// If daemon is None, all requests go directly to in-process.
+    pub fn new(daemon: Option<DaemonClient>) -> Self {
+        Self {
+            daemon,
+            in_process: InProcessService::new(),
+        }
+    }
+}
+
+impl DebriefService for Service {
+    async fn index(&self, project_root: &Path, path: &Path) -> Result<IndexResult> {
+        if let Some(d) = &self.daemon {
+            match d.index(project_root, path).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
+        }
+        self.in_process.index(project_root, path).await
+    }
+
+    async fn search(
+        &self,
+        project_root: &Path,
+        query: &str,
+        top_k: usize,
+        include_deps: bool,
+    ) -> Result<Vec<SearchResult>> {
+        if let Some(d) = &self.daemon {
+            match d.search(project_root, query, top_k, include_deps).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
+        }
+        self.in_process
+            .search(project_root, query, top_k, include_deps)
+            .await
+    }
+
+    async fn overview(&self, project_root: &Path, file: &Path) -> Result<String> {
+        if let Some(d) = &self.daemon {
+            match d.overview(project_root, file).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
+        }
+        self.in_process.overview(project_root, file).await
+    }
+
+    async fn dep_overview(&self, project_root: &Path, crate_name: &str) -> Result<String> {
+        if let Some(d) = &self.daemon {
+            match d.dep_overview(project_root, crate_name).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
+        }
+        self.in_process.dep_overview(project_root, crate_name).await
+    }
+
+    async fn set_embedding_model(
+        &self,
+        project_root: &Path,
+        model: &str,
+        global: bool,
+    ) -> Result<()> {
+        if let Some(d) = &self.daemon {
+            match d.set_embedding_model(project_root, model, global).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
+        }
+        self.in_process
+            .set_embedding_model(project_root, model, global)
+            .await
     }
 }
 
