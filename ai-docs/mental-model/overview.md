@@ -31,5 +31,5 @@
 
 ## Technical Debt
 
-- `index`, `search`, and `get_skeleton` on `InProcessService` are still stubs that return `anyhow::bail!`. Only `set_embedding_model` is fully implemented.
 - `find_git_root` does not support git worktrees or submodules (`.git` file vs. directory). See `config.md`.
+- `service.rs::index_path` duplicates the git-root-walk logic from `config.rs::find_git_root`. A third caller should prompt a shared utility.

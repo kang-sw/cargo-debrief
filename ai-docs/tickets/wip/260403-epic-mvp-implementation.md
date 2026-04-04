@@ -31,7 +31,8 @@ Research: `260403-research-rag-architecture`
 - ONNX embedding pipeline + model auto-download
 - hnsw_rs vector search + metadata score boosting
 - Versioned index persistence (`.git/debrief/index.bin`)
-- CLI commands: `index`, `search`, `get-skeleton`, `set-embedding-model`
+- CLI commands: `rebuild-index`, `search`, `overview`, `set-embedding-model`
+- Implicit auto-indexing on `search` and `overview`
 
 ### Out of scope (deferred)
 
@@ -94,10 +95,26 @@ Research: `260403-research-rag-architecture`
 
 ### Phase 1D — Integration & Polish
 
+> **UX decisions (2026-04-04 discussion):**
+>
+> - **Implicit indexing.** `search` and `overview` auto-check index
+>   freshness (compare `head_commit()` vs stored `last_indexed_commit`;
+>   check model name match) and perform incremental re-indexing
+>   transparently. First run triggers full index + model download.
+> - **`index` → `rebuild-index` rename.** The explicit indexing command
+>   becomes a manual recovery operation, deliberately named to discourage
+>   routine use. Normal workflow never needs it.
+> - **`get-skeleton` → `overview` rename.** The two commands serve
+>   fundamentally different purposes — `search` performs vector-similarity
+>   ranking, `overview` performs file-scoped overview-chunk lookup (no
+>   query needed). Kept as separate commands, but `overview` is a cleaner
+>   name that matches the internal `ChunkType::Overview` concept.
+
 8. **End-to-end wiring**
-   - `index` command: git tracking → chunking → embedding → store
-   - `search` command: query embedding → hnsw search → display results
-   - `get-skeleton` command: retrieve type overview chunks for a file
+   - `rebuild-index` command: git tracking → chunking → embedding → store (explicit full rebuild)
+   - `search` command: implicit index check → query embedding → hnsw search → display results
+   - `overview` command: implicit index check → filter overview chunks for file → display
+   - Implicit indexing: shared `ensure_index_fresh` logic used by search/overview
    - Incremental re-indexing (diff-based update)
 
 ## Dependencies (Cargo.toml)
@@ -121,12 +138,12 @@ Versions are approximate — verify latest at implementation time.
 
 ## Success Criteria
 
-- `cargo debrief index .` successfully indexes this project's Rust source
-- `cargo debrief search "chunking"` returns relevant chunks with metadata
+- `cargo debrief search "chunking"` auto-indexes on first run, returns relevant chunks
 - `cargo debrief search "DebriefService"` returns the trait definition
   (metadata boost places it at #1)
-- `cargo debrief get-skeleton src/main.rs` returns file overview
+- `cargo debrief overview src/main.rs` returns file API surface
 - Incremental re-index after a code change re-embeds only changed files
+- `cargo debrief rebuild-index .` forces full re-index
 - Index persists to `.git/debrief/` and reloads on next invocation
 
 ## Result
@@ -155,3 +172,29 @@ Versions are approximate — verify latest at implementation time.
 - `ort` pinned to `2.0.0-rc.12` (pre-release; cargo rejects `"^2"`)
 - `ndarray` not needed — used tuple tensor construction instead
 - Model named `nomic-embed-text-v1.5` (no separate `nomic-embed-code` ONNX export exists)
+
+### Phase 1D — Integration & Polish (completed 2026-04-04)
+
+**End-to-end wiring** (`src/service.rs`, +219/-50 lines):
+- `InProcessService::index` — full reindex pipeline: config → git changes → RustChunker → embed_batch → save_index
+- `InProcessService::search` — ensure_index_fresh → flatten chunks → SearchIndex::build → search
+- `InProcessService::overview` — ensure_index_fresh → filter ChunkType::Overview → join display_text
+- `ensure_index_fresh` — compares HEAD commit and model name against stored index, triggers incremental or full reindex as needed
+- Private helpers: `index_path`, `make_embedder`, `run_index` (shared by explicit and implicit indexing)
+
+**CLI renames**:
+- `index` → `rebuild-index` (manual recovery, no path argument)
+- `get-skeleton` → `overview` (matches internal ChunkType::Overview)
+- Implicit auto-indexing on `search` and `overview`
+
+**Smoke test results** (self-hosted, 13 files, 144 chunks):
+- `search "chunking"` → #1 Chunk struct (0.76), #2 Chunker trait (0.72)
+- `search "DebriefService"` → #1 trait def (0.92), +0.35 gap from symbol boost
+- `overview src/chunk.rs` → 5 type definitions shown
+
+**Tests**: 37 passing, 2 ignored. Net -1 from stub test removal.
+
+**Deviations from plan**:
+- `embed_batch` called synchronously (spawn_blocking deferred as tech debt)
+- `_path` parameter on `index` silently ignored (removed from CLI, trait parameter kept for future use)
+- `SearchIndex::build` clones all chunks from IndexData (optimization deferred)

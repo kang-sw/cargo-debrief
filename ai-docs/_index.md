@@ -7,7 +7,7 @@ wrapper, all logic behind `lib.rs`):
 
 ```
 src/
-  main.rs       — CLI entrypoint (clap): index, search, get-skeleton, set-embedding-model
+  main.rs       — CLI entrypoint (clap): rebuild-index, search, overview, set-embedding-model
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
   service.rs    — DebriefService trait (async RPITIT, project_root per method) + InProcessService (zero-sized)
@@ -58,11 +58,11 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 
 ```bash
 cargo build
-cargo test                                           # unit (38) + offline integration (8) + network integration (3)
+cargo test                                           # unit (37) + offline integration (8) + network integration (3)
 CARGO_DEBRIEF_SKIP_NETWORK=1 cargo test              # skip network tests (no model download)
-cargo run -- index [<path>]                          # index current directory
-cargo run -- search "query" [--top-k N]              # vector search + metadata boosting
-cargo run -- get-skeleton <file>                     # file-level overview
+cargo run -- rebuild-index [<path>]                  # full re-index (manual/recovery)
+cargo run -- search "query" [--top-k N]              # vector search + metadata boosting (auto-indexes)
+cargo run -- overview <file>                         # file-level overview (auto-indexes)
 cargo run -- set-embedding-model [--global] <name>   # configure model
 cargo run -- daemon status                           # check daemon
 ```
@@ -76,6 +76,11 @@ cargo run -- daemon status                           # check daemon
 | Network integration | `tests/integration_network.rs` | Yes (~130MB model download, cached) | Real ONNX embedder + search, chunker→embedder compatibility, semantic search quality smoke tests |
 
 Network tests download `nomic-embed-text-v1.5` on first run to `~/.local/share/debrief/models/` (Linux) or `~/Library/Application Support/debrief/models/` (macOS). Cached after first download. Skip with `CARGO_DEBRIEF_SKIP_NETWORK=1`.
+
+### Smoke test
+
+See `ai-docs/smoke-test.md` for the manual CLI verification protocol.
+Run after changes to service wiring, chunker, embedder, search, or store.
 
 ## Mental Model
 
@@ -96,3 +101,4 @@ See `ai-docs/mental-model/` for operational knowledge:
 - Phase 1B core indexing pipeline implemented: chunk model, tree-sitter Rust chunking, git tracking, index serialization.
 - Service trait refactored: `project_root: &Path` added to all `DebriefService` methods; `InProcessService` is now zero-sized; config loading removed from `main.rs`.
 - Phase 1C search pipeline implemented: embedder.rs (ONNX inference via ort, model registry with nomic-embed-text-v1.5 + bge-large-en-v1.5, streaming download, mean pooling + L2 norm), search.rs (hnsw_rs ANN, metadata symbol-name boosting), config save_config, set_embedding_model wired.
+- Phase 1D integration & polish: end-to-end wiring of `index`, `search`, `overview` in InProcessService. Implicit auto-indexing via `ensure_index_fresh`. CLI renames: `index` → `rebuild-index`, `get-skeleton` → `overview`. Smoke test protocol added.
