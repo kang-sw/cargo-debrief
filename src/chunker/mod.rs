@@ -1,8 +1,12 @@
+pub mod rust;
+
 use std::path::Path;
 
 use anyhow::Result;
 
 use crate::chunk::Chunk;
+
+pub use rust::RustChunker;
 
 /// Language-extensible chunking interface.
 pub trait Chunker {
