@@ -112,6 +112,18 @@ Bump `INDEX_VERSION`.
 - "command line argument parsing" returns structural results
   (Flag trait overview, HiArgs) not micro-impl accessors
 
+### Result (941a1d8) — 26-04-04
+
+Phase 2 implemented: methods ≤5 lines inlined (full body) into type
+overview chunks instead of separate function chunks. Free functions
+aggregated into new module overview chunk (`ChunkKind::Module`).
+`INDEX_VERSION` bumped to 3. All tests pass (37 unit + 8 integration).
+
+**Success criteria evaluation pending** — implementation complete but
+post-merge search quality eval against ripgrep not yet run. Expected:
+significant chunk count reduction in flag-heavy files (e.g., `defs.rs`)
+and improved overview chunk ranking.
+
 ## Phase 3 — P2: Overview Ordering + Search Output UX
 
 **P3 (progress feedback) completed in Phase 1** — `eprint!(".")`
