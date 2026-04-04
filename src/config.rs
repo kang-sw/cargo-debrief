@@ -14,6 +14,13 @@ pub struct ConfigPaths {
     pub local: Option<PathBuf>,
 }
 
+/// Dependency-specific configuration.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct DependencyConfig {
+    /// Crate names to exclude from dependency indexing.
+    pub exclude: Option<Vec<String>>,
+}
+
 /// Project-level configuration, merged from all layers.
 ///
 /// Resolution order: local > project > global > built-in default.
@@ -22,6 +29,7 @@ pub struct ConfigPaths {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub embedding_model: Option<String>,
+    pub dependencies: Option<DependencyConfig>,
 }
 
 impl Config {
@@ -30,6 +38,16 @@ impl Config {
     fn merge(&mut self, other: Config) {
         if other.embedding_model.is_some() {
             self.embedding_model = other.embedding_model;
+        }
+        if let Some(other_deps) = other.dependencies {
+            match &mut self.dependencies {
+                Some(existing) => {
+                    if other_deps.exclude.is_some() {
+                        existing.exclude = other_deps.exclude;
+                    }
+                }
+                None => self.dependencies = Some(other_deps),
+            }
         }
     }
 }
@@ -160,9 +178,11 @@ mod tests {
     fn merge_overrides_fields() {
         let mut base = Config {
             embedding_model: Some("base-model".into()),
+            ..Default::default()
         };
         let overlay = Config {
             embedding_model: Some("overlay-model".into()),
+            ..Default::default()
         };
         base.merge(overlay);
         assert_eq!(base.embedding_model.as_deref(), Some("overlay-model"));
@@ -172,9 +192,11 @@ mod tests {
     fn merge_preserves_when_overlay_is_none() {
         let mut base = Config {
             embedding_model: Some("base-model".into()),
+            ..Default::default()
         };
         let overlay = Config {
             embedding_model: None,
+            ..Default::default()
         };
         base.merge(overlay);
         assert_eq!(base.embedding_model.as_deref(), Some("base-model"));
@@ -247,6 +269,7 @@ mod tests {
 
         let config = Config {
             embedding_model: Some("test-model".into()),
+            ..Default::default()
         };
         save_config(&path, &config)?;
 
@@ -267,9 +290,56 @@ mod tests {
 
         let config = Config {
             embedding_model: Some("test-model".into()),
+            ..Default::default()
         };
         save_config(&path, &config)?;
         assert!(path.exists());
         Ok(())
+    }
+
+    #[test]
+    fn test_config_exclude_list_round_trip() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+
+        fs::write(
+            &path,
+            "[dependencies]\nexclude = [\"syn\", \"proc-macro2\"]\n",
+        )?;
+
+        let paths = ConfigPaths {
+            global: Some(path),
+            project: None,
+            local: None,
+        };
+        let config = load_config(&paths)?;
+        let deps = config.dependencies.expect("dependencies should be present");
+        let exclude = deps.exclude.expect("exclude should be present");
+        assert_eq!(exclude, vec!["syn".to_string(), "proc-macro2".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_exclude_list_merge() {
+        let mut base = Config {
+            embedding_model: Some("base-model".into()),
+            dependencies: Some(DependencyConfig {
+                exclude: Some(vec!["serde".to_string()]),
+            }),
+        };
+        let overlay = Config {
+            embedding_model: None,
+            dependencies: Some(DependencyConfig {
+                exclude: Some(vec!["syn".to_string()]),
+            }),
+        };
+        base.merge(overlay);
+        let exclude = base
+            .dependencies
+            .unwrap()
+            .exclude
+            .expect("exclude should be present");
+        // Overlay replaces the base exclude list.
+        assert_eq!(exclude, vec!["syn".to_string()]);
     }
 }
