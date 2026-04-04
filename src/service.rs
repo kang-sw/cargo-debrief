@@ -760,21 +760,36 @@ impl DebriefService for DaemonClient {
 }
 
 // ---------------------------------------------------------------------------
-// Service — dispatch enum wrapping InProcess and Daemon
+// Service — dispatch with daemon-first fallback to InProcess
 // ---------------------------------------------------------------------------
 
-/// Unified service dispatch: either in-process or via daemon IPC.
-pub enum Service {
-    InProcess(InProcessService),
-    Daemon(DaemonClient),
+/// Unified service dispatch: tries daemon first, falls back to in-process
+/// on any IPC transport failure (R6/R8/R10).
+pub struct Service {
+    daemon: Option<DaemonClient>,
+    in_process: InProcessService,
+}
+
+impl Service {
+    /// Create a service with both daemon and in-process backends.
+    /// If daemon is None, all requests go directly to in-process.
+    pub fn new(daemon: Option<DaemonClient>) -> Self {
+        Self {
+            daemon,
+            in_process: InProcessService::new(),
+        }
+    }
 }
 
 impl DebriefService for Service {
     async fn index(&self, project_root: &Path, path: &Path) -> Result<IndexResult> {
-        match self {
-            Service::InProcess(s) => s.index(project_root, path).await,
-            Service::Daemon(d) => d.index(project_root, path).await,
+        if let Some(d) = &self.daemon {
+            match d.index(project_root, path).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
         }
+        self.in_process.index(project_root, path).await
     }
 
     async fn search(
@@ -784,24 +799,35 @@ impl DebriefService for Service {
         top_k: usize,
         include_deps: bool,
     ) -> Result<Vec<SearchResult>> {
-        match self {
-            Service::InProcess(s) => s.search(project_root, query, top_k, include_deps).await,
-            Service::Daemon(d) => d.search(project_root, query, top_k, include_deps).await,
+        if let Some(d) = &self.daemon {
+            match d.search(project_root, query, top_k, include_deps).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
         }
+        self.in_process
+            .search(project_root, query, top_k, include_deps)
+            .await
     }
 
     async fn overview(&self, project_root: &Path, file: &Path) -> Result<String> {
-        match self {
-            Service::InProcess(s) => s.overview(project_root, file).await,
-            Service::Daemon(d) => d.overview(project_root, file).await,
+        if let Some(d) = &self.daemon {
+            match d.overview(project_root, file).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
         }
+        self.in_process.overview(project_root, file).await
     }
 
     async fn dep_overview(&self, project_root: &Path, crate_name: &str) -> Result<String> {
-        match self {
-            Service::InProcess(s) => s.dep_overview(project_root, crate_name).await,
-            Service::Daemon(d) => d.dep_overview(project_root, crate_name).await,
+        if let Some(d) = &self.daemon {
+            match d.dep_overview(project_root, crate_name).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
         }
+        self.in_process.dep_overview(project_root, crate_name).await
     }
 
     async fn set_embedding_model(
@@ -810,10 +836,15 @@ impl DebriefService for Service {
         model: &str,
         global: bool,
     ) -> Result<()> {
-        match self {
-            Service::InProcess(s) => s.set_embedding_model(project_root, model, global).await,
-            Service::Daemon(d) => d.set_embedding_model(project_root, model, global).await,
+        if let Some(d) = &self.daemon {
+            match d.set_embedding_model(project_root, model, global).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
         }
+        self.in_process
+            .set_embedding_model(project_root, model, global)
+            .await
     }
 }
 

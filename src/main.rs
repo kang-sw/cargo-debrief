@@ -5,7 +5,7 @@ use cargo_debrief::{
     chunk::ChunkOrigin,
     daemon,
     ipc::protocol::{DaemonRequest, DaemonResponse},
-    service::{DaemonClient, DebriefService, InProcessService, Service},
+    service::{DebriefService, Service},
 };
 use clap::{Parser, Subcommand};
 
@@ -70,13 +70,10 @@ enum DaemonAction {
     Stop,
 }
 
-/// Try to connect to a running daemon; fall back to in-process service.
+/// Resolve the service backend: try daemon (auto-spawn if needed), fall back to in-process.
 fn resolve_service(project_root: &std::path::Path) -> Service {
-    if let Some(client) = DaemonClient::connect(project_root) {
-        Service::Daemon(client)
-    } else {
-        Service::InProcess(InProcessService::new())
-    }
+    let client = daemon::auto_spawn_and_connect(project_root);
+    Service::new(client)
 }
 
 #[tokio::main]
