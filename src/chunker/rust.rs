@@ -8,6 +8,10 @@ use crate::chunk::{Chunk, ChunkKind, ChunkMetadata, ChunkType, Visibility};
 
 use super::Chunker;
 
+/// Methods/functions with this many lines or fewer are inlined into their
+/// parent overview chunk instead of getting a standalone function chunk.
+const MIN_METHOD_CHUNK_LINES: usize = 5;
+
 pub struct RustChunker;
 
 impl Chunker for RustChunker {
@@ -360,17 +364,33 @@ impl<'a> ChunkCollector<'a> {
             // Generate overview chunk.
             chunks.push(self.build_overview_chunk(type_name, overview));
 
-            // Generate function chunks for each method in each impl block.
+            // Generate function chunks only for large methods (small ones are inlined in overview).
             for impl_block in &overview.impls {
                 for method in &impl_block.methods {
-                    chunks.push(self.build_method_chunk(type_name, &impl_block.header, *method));
+                    let method_lines = method.end_position().row - method.start_position().row + 1;
+                    if method_lines > MIN_METHOD_CHUNK_LINES {
+                        chunks.push(self.build_method_chunk(
+                            type_name,
+                            &impl_block.header,
+                            *method,
+                        ));
+                    }
                 }
             }
         }
 
-        // Process free functions.
-        for free_fn in &free_functions {
-            chunks.push(self.build_free_function_chunk(free_fn));
+        // Module overview chunk aggregating free functions.
+        if !free_functions.is_empty() {
+            chunks.push(self.build_module_overview_chunk(&free_functions));
+
+            // Only generate separate chunks for large free functions.
+            for free_fn in &free_functions {
+                let fn_lines =
+                    free_fn.node.end_position().row - free_fn.node.start_position().row + 1;
+                if fn_lines > MIN_METHOD_CHUNK_LINES {
+                    chunks.push(self.build_free_function_chunk(free_fn));
+                }
+            }
         }
 
         chunks
@@ -385,12 +405,18 @@ impl<'a> ChunkCollector<'a> {
             display_parts.push(def_text.to_string());
         }
 
-        // Impl block signatures.
+        // Impl block signatures (small methods inlined, large ones as signature-only).
         for impl_block in &overview.impls {
             let mut impl_text = format!("{} {{", impl_block.header);
             for method in &impl_block.methods {
-                let sig = signature_without_body(self.source_str, *method);
-                impl_text.push_str(&format!("\n    {sig}"));
+                let method_lines = method.end_position().row - method.start_position().row + 1;
+                if method_lines <= MIN_METHOD_CHUNK_LINES {
+                    let full_text = node_text(*method, self.source);
+                    impl_text.push_str(&format!("\n    {full_text}"));
+                } else {
+                    let sig = signature_without_body(self.source_str, *method);
+                    impl_text.push_str(&format!("\n    {sig}"));
+                }
             }
             impl_text.push_str("\n}");
             display_parts.push(impl_text);
@@ -517,6 +543,68 @@ impl<'a> ChunkCollector<'a> {
         }
     }
 
+    fn build_module_overview_chunk(&self, free_functions: &[FreeFunction<'_>]) -> Chunk {
+        let mut display_parts = Vec::new();
+        display_parts.push(format!("// {}", self.module_path));
+
+        for free_fn in free_functions {
+            let node = free_fn.node;
+            let fn_lines = node.end_position().row - node.start_position().row + 1;
+            if fn_lines <= MIN_METHOD_CHUNK_LINES {
+                display_parts.push(node_text(node, self.source).to_string());
+            } else {
+                display_parts.push(signature_without_body(self.source_str, node));
+            }
+        }
+
+        let display_text = display_parts.join("\n\n");
+
+        let start_row = free_functions
+            .iter()
+            .map(|f| f.node.start_position().row)
+            .min()
+            .unwrap_or(0);
+        let end_row = free_functions
+            .iter()
+            .map(|f| f.node.end_position().row)
+            .max()
+            .unwrap_or(0);
+
+        let file_path_str = self.file_path.to_string_lossy().to_string();
+        let module_name = self
+            .module_path
+            .rsplit("::")
+            .next()
+            .unwrap_or(self.module_path);
+
+        let embedding_text = format!(
+            "// {module} ({file}:{start}..{end})\n\
+             // Module overview\n\
+             {display}",
+            module = self.module_path,
+            file = file_path_str,
+            start = start_row,
+            end = end_row,
+            display = display_text,
+        );
+
+        Chunk {
+            display_text,
+            embedding_text,
+            metadata: ChunkMetadata {
+                symbol_name: module_name.to_string(),
+                kind: ChunkKind::Module,
+                chunk_type: ChunkType::Overview,
+                parent: None,
+                visibility: Visibility::Pub,
+                file_path: file_path_str,
+                line_range: (start_row, end_row),
+                signature: None,
+            },
+            embedding: None,
+        }
+    }
+
     fn build_free_function_chunk(&self, free_fn: &FreeFunction<'_>) -> Chunk {
         let node = free_fn.node;
         let fn_name = node
@@ -623,43 +711,40 @@ impl Foo {
 "#;
         let chunks = chunk_source(source);
 
-        // 1 overview + 2 function chunks.
+        // Small methods (≤5 lines) are inlined into overview, no separate function chunks.
         let overview = chunks
             .iter()
-            .find(|c| c.metadata.chunk_type == ChunkType::Overview);
-        assert!(overview.is_some(), "should have overview chunk");
-        let overview = overview.unwrap();
-        assert_eq!(overview.metadata.symbol_name, "Foo");
+            .find(|c| {
+                c.metadata.symbol_name == "Foo" && c.metadata.chunk_type == ChunkType::Overview
+            })
+            .expect("should have overview chunk");
         assert_eq!(overview.metadata.kind, ChunkKind::Struct);
         assert_eq!(overview.metadata.visibility, Visibility::Pub);
 
-        // Overview display_text should contain the struct def and impl signatures.
+        // Overview should contain the struct def and inlined method bodies.
         assert!(overview.display_text.contains("pub struct Foo"));
         assert!(
             overview
                 .display_text
-                .contains("pub fn new(value: i32) -> Self;")
+                .contains("pub fn new(value: i32) -> Self"),
+            "display_text: {}",
+            overview.display_text
         );
-        assert!(overview.display_text.contains("pub fn get(&self) -> i32;"));
+        assert!(
+            overview.display_text.contains("Self { value }"),
+            "small method should be inlined with body"
+        );
 
+        // No separate function chunks — both methods are ≤5 lines.
         let fn_chunks: Vec<_> = chunks
             .iter()
             .filter(|c| c.metadata.chunk_type == ChunkType::Function)
             .collect();
-        assert_eq!(fn_chunks.len(), 2, "should have 2 function chunks");
-
-        // Method chunks should have parent = Foo.
-        for fc in &fn_chunks {
-            assert_eq!(fc.metadata.parent.as_deref(), Some("Foo"));
-            assert_eq!(fc.metadata.kind, ChunkKind::Function);
-        }
-
-        let new_chunk = fn_chunks
-            .iter()
-            .find(|c| c.metadata.symbol_name == "Foo::new")
-            .expect("should have Foo::new chunk");
-        assert!(new_chunk.display_text.contains("impl Foo"));
-        assert!(new_chunk.display_text.contains("pub fn new"));
+        assert_eq!(
+            fn_chunks.len(),
+            0,
+            "small methods should not produce function chunks"
+        );
     }
 
     #[test]
@@ -697,10 +782,13 @@ impl std::fmt::Display for Bar {
             "display_text: {}",
             overview.display_text
         );
+        // Small methods are inlined with full body, not signature-only.
         assert!(
             overview
                 .display_text
-                .contains("pub fn hello(&self) -> String;")
+                .contains("pub fn hello(&self) -> String"),
+            "display_text: {}",
+            overview.display_text
         );
         assert!(overview.display_text.contains("fn fmt("));
     }
@@ -734,20 +822,20 @@ pub fn do_stuff(x: i32) -> i32 {
 }
 "#;
         let chunks = chunk_source(source);
-        assert_eq!(chunks.len(), 1);
 
+        // Small free function (≤5 lines) is inlined into module overview only.
+        assert_eq!(chunks.len(), 1);
         let chunk = &chunks[0];
-        assert_eq!(chunk.metadata.symbol_name, "do_stuff");
-        assert_eq!(chunk.metadata.kind, ChunkKind::Function);
-        assert_eq!(chunk.metadata.chunk_type, ChunkType::Function);
-        assert_eq!(chunk.metadata.visibility, Visibility::Pub);
+        assert_eq!(chunk.metadata.symbol_name, "example");
+        assert_eq!(chunk.metadata.kind, ChunkKind::Module);
+        assert_eq!(chunk.metadata.chunk_type, ChunkType::Overview);
         assert!(chunk.metadata.parent.is_none());
         assert!(chunk.display_text.contains("crate::example"));
         assert!(chunk.display_text.contains("pub fn do_stuff"));
 
-        // Embedding text should include doc comment.
+        // Embedding text should include module context.
         assert!(
-            chunk.embedding_text.contains("Does something useful"),
+            chunk.embedding_text.contains("Module overview"),
             "embedding: {}",
             chunk.embedding_text
         );
@@ -772,11 +860,28 @@ impl ExternalType {
         // No definition, so kind should be Impl.
         assert_eq!(overview.metadata.kind, ChunkKind::Impl);
 
-        let method = chunks
+        // Small method (≤5 lines) is inlined into overview, no separate function chunk.
+        assert!(
+            overview
+                .display_text
+                .contains("pub fn adapt(&self) -> String"),
+            "overview should contain method: {}",
+            overview.display_text
+        );
+        assert!(
+            overview.display_text.contains("\"adapted\".to_string()"),
+            "overview should contain method body: {}",
+            overview.display_text
+        );
+        let fn_chunks: Vec<_> = chunks
             .iter()
-            .find(|c| c.metadata.symbol_name == "ExternalType::adapt")
-            .expect("should have method chunk");
-        assert_eq!(method.metadata.parent.as_deref(), Some("ExternalType"));
+            .filter(|c| c.metadata.chunk_type == ChunkType::Function)
+            .collect();
+        assert_eq!(
+            fn_chunks.len(),
+            0,
+            "small method should not produce a separate function chunk"
+        );
     }
 
     #[test]
@@ -806,38 +911,70 @@ mod inner {
             .expect("should find Nested in inner module");
         assert_eq!(overview.metadata.kind, ChunkKind::Struct);
 
-        let helper = chunks
+        // Small free function (≤5 lines) is inlined into module overview chunk.
+        let mod_overview = chunks
             .iter()
-            .find(|c| c.metadata.symbol_name == "helper")
-            .expect("should find helper in inner module");
+            .find(|c| c.metadata.kind == ChunkKind::Module)
+            .expect("should have module overview containing helper");
         assert!(
-            helper.embedding_text.contains("crate::example::inner"),
+            mod_overview.display_text.contains("pub fn helper()"),
+            "module overview should contain helper: {}",
+            mod_overview.display_text
+        );
+        assert!(
+            mod_overview.embedding_text.contains("crate::example"),
             "embedding: {}",
-            helper.embedding_text
+            mod_overview.embedding_text
         );
     }
 
     #[test]
     fn visibility_detection() {
+        // Test parse_visibility directly on tree-sitter nodes since small
+        // free functions (≤5 lines) no longer get individual chunks.
         let source = r#"
 pub fn public_fn() {}
 pub(crate) fn crate_fn() {}
 pub(super) fn super_fn() {}
 fn private_fn() {}
 "#;
+
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        let mut functions = Vec::new();
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "function_item" {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| n.utf8_text(source.as_bytes()).unwrap())
+                    .unwrap_or("");
+                let vis = parse_visibility(child, source.as_bytes());
+                functions.push((name, vis));
+            }
+        }
+
+        assert_eq!(functions.len(), 4);
+        assert_eq!(functions[0], ("public_fn", Visibility::Pub));
+        assert_eq!(functions[1], ("crate_fn", Visibility::PubCrate));
+        assert_eq!(functions[2], ("super_fn", Visibility::PubSuper));
+        assert_eq!(functions[3], ("private_fn", Visibility::Private));
+
+        // Also verify the module overview chunk exists with all functions.
         let chunks = chunk_source(source);
-
-        let vis = |name: &str| {
-            chunks
-                .iter()
-                .find(|c| c.metadata.symbol_name == name)
-                .map(|c| c.metadata.visibility)
-        };
-
-        assert_eq!(vis("public_fn"), Some(Visibility::Pub));
-        assert_eq!(vis("crate_fn"), Some(Visibility::PubCrate));
-        assert_eq!(vis("super_fn"), Some(Visibility::PubSuper));
-        assert_eq!(vis("private_fn"), Some(Visibility::Private));
+        let mod_overview = chunks
+            .iter()
+            .find(|c| c.metadata.kind == ChunkKind::Module)
+            .expect("should have module overview");
+        assert!(mod_overview.display_text.contains("pub fn public_fn"));
+        assert!(mod_overview.display_text.contains("pub(crate) fn crate_fn"));
+        assert!(mod_overview.display_text.contains("pub(super) fn super_fn"));
+        assert!(mod_overview.display_text.contains("fn private_fn"));
     }
 
     #[test]
