@@ -9,15 +9,16 @@ related:
   - 260404-idea-usability-test-repos  # test that produced these findings
   - 260404-feat-rust-chunking-population  # P1 overlaps with chunking improvements
   - 260404-feat-dependency-chunking  # GPU pre-req shared
+  - 260404-feat-llm-chunk-summarization  # structural query mitigation
 ---
 
 # Fix Usability Test Findings
 
 Results from ripgrep usability test (`ai-docs/usability-test-ripgrep.md`).
-Full ripgrep (100 files, ~26K chunks) triggers SIGKILL during embedding.
-5-file subset shows 58% top-3 relevance — symbol lookup excellent,
-structural semantic queries weak (embedding model limitation, not
-actionable here).
+Full ripgrep (100 files, 3070 chunks) triggered SIGKILL during embedding
+before P0 fix. 5-file subset showed 58% top-3 relevance; full-repo
+post-fix shows 62.5%. Symbol lookup excellent, structural semantic
+queries weak (micro-chunk dilution + embedding model limitation).
 
 ## Phase 1 — P0: Batch Embedding Split + GPU Acceleration
 
@@ -39,6 +40,31 @@ Cargo.toml). This reduces indexing time for the larger batch counts.
 - `rebuild-index` completes on full ripgrep (100 files, ~26K chunks)
 - Memory usage stays bounded (~500MB peak, not 26GB)
 - GPU provider used when available (verify via log or env var)
+
+### Result (b58d6f8) — 26-04-04
+
+Phase 1 implemented: batch split (64 chunks per `embed_batch` call) +
+GPU execution provider registration (CoreML/CUDA behind feature flags)
++ progress dots to stderr.
+
+Full ripgrep CPU result: **3070 chunks, 100 files, 9m37s** — no crash.
+Previous chunk estimate (~26K) was wrong — based on 5-file subset of
+largest files. Real average is ~30 chunks/file, not 266.
+
+Search quality: 15/24 (62.5%) vs baseline 14/24 (58%).
+R1, R2 improved (more files indexed). S1, T3 regressed (micro-chunk
+dilution — addressed by Phase 2).
+
+**GPU/CoreML memory issue discovered:** `cargo-debrief-gpu rebuild-index`
+on full ripgrep consumed 41 GB RSS before being killed. The CoreML
+execution provider appears to accumulate memory across batches rather
+than releasing intermediate state. CPU-only path unaffected.
+`gpu` feature flag should carry a warning until this is investigated.
+Possible causes: ort 2.0-rc CoreML binding leak, CoreML compilation
+cache, or macOS unified memory accounting.
+GPU/CoreML: SIGTERM at 4m25s with "Context leak detected" warnings.
+CoreML EP not releasing Neural Engine context between batches.
+Theoretical 2.17x speedup if stable, but unusable as-is.
 
 ## Phase 2 — P1: Micro-Chunk Merging
 
@@ -86,54 +112,24 @@ Bump `INDEX_VERSION`.
 - "command line argument parsing" returns structural results
   (Flag trait overview, HiArgs) not micro-impl accessors
 
-## Phase 3 — P2 + P3: Overview Ordering + Progress Feedback
+## Phase 3 — P2: Overview Ordering + Search Output UX
+
+**P3 (progress feedback) completed in Phase 1** — `eprint!(".")`
+dots per batch + summary line. No further work needed.
 
 **P2: Overview ordering.** `overview` output shows private types before
 public API. Sort: `pub` items first, then `pub(crate)`, then private.
 Change is in the overview rendering path, not the chunker.
 
-**P3: Progress feedback.** Add minimal, LLM-friendly progress output.
-No CLI animation (progress bars, spinners). Print `indexing` once,
-then append a `.` every ~3 seconds (no newline), then newline + done:
-
-```
-indexing..........
-done. 1332 chunks, 100 files.
-```
-
-Single growing line via `eprint!(".")` + `flush()`.
-Output to stderr to keep stdout clean for piping.
+**P4: Search output module context line.** Add a `// in crate::module`
+line to search results for module path context. Data already exists in
+`embedding_text`; expose in `display_text` output. Informed by
+cargo-brief output format comparison.
 
 ### Success criteria
 
 - `overview src/standard.rs` shows `Standard<W>` before `Config`
-- `rebuild-index` on ripgrep shows per-file or per-batch progress
-
-### Result (b58d6f8) — 26-04-04
-
-Phase 1 implemented: batch split (64 chunks per `embed_batch` call) +
-GPU execution provider registration (CoreML/CUDA behind feature flags)
-+ progress dots to stderr.
-
-**GPU/CoreML memory issue discovered:** `cargo-debrief-gpu rebuild-index`
-on full ripgrep consumed 41 GB RSS before being killed. The CoreML
-execution provider appears to accumulate memory across batches rather
-than releasing intermediate state. CPU-only path unaffected.
-`gpu` feature flag should carry a warning until this is investigated.
-Possible causes: ort 2.0-rc CoreML binding leak, CoreML compilation
-cache, or macOS unified memory accounting.
-
-Full ripgrep CPU result: **3070 chunks, 100 files, 9m37s** — no crash.
-Previous chunk estimate (~26K) was wrong — based on 5-file subset of
-largest files. Real average is ~30 chunks/file, not 266.
-
-Search quality: 15/24 (62.5%) vs baseline 14/24 (58%).
-R1, R2 improved (more files indexed). S1, T3 regressed (micro-chunk
-dilution — addressed by Phase 2).
-
-GPU/CoreML: SIGTERM at 4m25s with "Context leak detected" warnings.
-CoreML EP not releasing Neural Engine context between batches.
-Theoretical 2.17x speedup if stable, but unusable as-is.
+- Search results include module path context line
 
 ## Known Limitations (Not Addressed)
 

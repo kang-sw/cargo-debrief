@@ -119,3 +119,8 @@ Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunkin
 - Phase 1C search pipeline implemented: embedder.rs (ONNX inference via ort, model registry with nomic-embed-text-v1.5 + bge-large-en-v1.5, streaming download, mean pooling + L2 norm), search.rs (hnsw_rs ANN, metadata symbol-name boosting), config save_config, set_embedding_model wired.
 - Phase 1D integration & polish: end-to-end wiring of `index`, `search`, `overview` in InProcessService. Implicit auto-indexing via `ensure_index_fresh`. CLI renames: `index` → `rebuild-index`, `get-skeleton` → `overview`. Smoke test protocol added.
 - Post-MVP roadmap defined: A→C→D*→B→D ordering. Daemon revised to per-workspace with temp-file RPC. Dependency chunking: all transitive, pub API only, root-dep annotation in embedding text.
+- P0 batch split implemented (64-chunk batches). GPU EP registered (CoreML/CUDA behind feature flags). CoreML unstable (41GB RSS, context leak). CPU path verified on full ripgrep: 3070 chunks, 100 files, 9m37s.
+- Full-repo search quality: 15/24 (62.5%). S1/T3 regressions from micro-chunk dilution — P1 merging designed (minimum body threshold + module overview chunk).
+- Spec updated: `set-embedding-model` → unified `config <key> [value] [--global]`. LLM chunk summarization feature added (external OpenAI-compatible endpoint for overview chunk summaries).
+- Roadmap: A→C→D*→E→B→D. E = LLM chunk summarization (`260404-feat-llm-chunk-summarization`).
+- cargo-brief output format reviewed for reference. Adopting: module context line in search output (Phase 3).
