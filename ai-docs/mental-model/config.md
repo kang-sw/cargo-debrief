@@ -10,6 +10,7 @@
 - `config_paths` returns `None` for `global` only if `dirs::config_dir()` returns `None` (rare; happens in stripped environments with no home directory). It returns `None` for both `project` and `local` together when no `.git` directory ancestor is found — they are always either both `Some` or both `None`, never one without the other.
 - `load_config` silently skips missing files; only malformed TOML causes an error. The error message always includes the offending file path.
 - `Config::merge` treats `None` in the overlay as "absent" — it does **not** overwrite an existing value. A `Some` in the overlay always wins.
+- `DependencyConfig::exclude` merge is **overlay-replaces**: if the overlay has a `Some` exclude list, it fully replaces the base list. There is no merging or deduplication across layers. A higher-priority layer that sets `exclude = ["syn"]` silently drops any `["serde"]` from a lower layer.
 
 ## Coupling
 
@@ -22,6 +23,10 @@
 1. Add the field as `Option<T>` to `Config` in `src/config.rs`.
 2. Add a branch to `Config::merge` — if you forget this step, the new field silently ignores all config layers and always returns its default value regardless of what is written in any config file.
 3. Add a `set_<field>` subcommand or update `SetEmbeddingModel` if the field needs CLI write support.
+
+**Adding a field to `DependencyConfig`:**
+
+Same merge-branch requirement applies inside the nested `Config::merge` arm for `dependencies`. Forgetting it means the field is read from any single layer but higher-priority layers cannot override it.
 
 **Writing a config layer (e.g. from a service method):**
 
