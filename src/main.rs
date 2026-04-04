@@ -65,6 +65,9 @@ async fn main() -> Result<()> {
                     r.line_range.0,
                     r.line_range.1,
                 );
+                if !r.module_path.is_empty() {
+                    println!("// in {}", r.module_path);
+                }
                 println!("{}", r.display_text);
                 println!();
             }

@@ -97,6 +97,7 @@ impl SearchIndex {
                     line_range: chunk.metadata.line_range,
                     score,
                     display_text: chunk.display_text.clone(),
+                    module_path: extract_module_path(&chunk.embedding_text),
                 }
             })
             .collect();
@@ -121,6 +122,24 @@ impl SearchIndex {
     ) -> Result<Vec<SearchResult>> {
         let query_vec = embedder.embed(query)?;
         self.search_by_vector(&query_vec, Some(query), top_k)
+    }
+}
+
+/// Extract the module path from the embedding text prefix.
+///
+/// Embedding text format: `// {module} ({file}:{start}..{end})\n...`
+/// Returns the module portion (e.g., `crate::foo::bar`), or an empty string
+/// if the format does not match.
+fn extract_module_path(embedding_text: &str) -> String {
+    let first_line = embedding_text.lines().next().unwrap_or("");
+    // Strip leading "// " and trailing " (file:...)"
+    let Some(after_slash) = first_line.strip_prefix("// ") else {
+        return String::new();
+    };
+    if let Some(paren_pos) = after_slash.rfind(" (") {
+        after_slash[..paren_pos].to_string()
+    } else {
+        after_slash.to_string()
     }
 }
 
@@ -262,5 +281,23 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_path, "src/a.rs");
+    }
+
+    #[test]
+    fn extract_module_path_normal() {
+        let text = "// crate::foo (src/foo.rs:1..42)\nfn bar() {}";
+        assert_eq!(extract_module_path(text), "crate::foo");
+    }
+
+    #[test]
+    fn extract_module_path_empty_string() {
+        assert_eq!(extract_module_path(""), "");
+    }
+
+    #[test]
+    fn extract_module_path_missing_prefix() {
+        // Single slash format — should return empty string, not a malformed value.
+        let text = "/ crate::foo (src/foo.rs:1..42)\nfn bar() {}";
+        assert_eq!(extract_module_path(text), "");
     }
 }
