@@ -16,8 +16,10 @@ features:
     - Vector Similarity Search
     - Metadata Score Boosting
   - Overview
-  - Embedding Model Management
+  - Configuration (`config` subcommand)
+    - Embedding Model Management
     - 🚧 GPU Acceleration
+  - 🚧 LLM Chunk Summarization
   - Index Persistence
   - 🚧 Daemon Mode
   - 🚧 MCP Server
@@ -73,7 +75,8 @@ automatically invisible to git status.
 User-level defaults stored in a platform-standard config directory
 (e.g., `~/.config/debrief/`).
 
-- Global embedding model preference (`set-embedding-model --global`)
+- Global preferences (embedding model, LLM endpoint, etc.) set via
+  `config <key> <value> --global`
 - Default chunking options
 - Project-level config (`.debrief/config.toml`) overrides global.
   Local config (`.git/debrief/local-config.toml`) overrides both.
@@ -312,28 +315,36 @@ cargo debrief overview <file>
 - Automatically checks index freshness and re-indexes if needed before
   retrieving the overview (implicit auto-indexing).
 
-## Embedding Model Management
+## Configuration
 
-Manage the embedding model used for vector search.
+Unified configuration interface using dotted key paths.
 
 ```
-cargo debrief set-embedding-model [--global] <model-name>
+cargo debrief config <key> [value] [--global]
+```
+
+- With `value`: set the key. Without `value`: print current value.
+- `--global` reads/writes global config (`~/.config/debrief/`).
+  Without `--global`, reads/writes project config (`.debrief/config.toml`).
+- `cargo debrief config --list` shows all resolved values with their
+  source (global, project, local, default).
+- Resolution order: local → project → global → default.
+
+### Embedding Model Management
+
+```
+cargo debrief config embedding.model <model-name> [--global]
 ```
 
 - On first use, the default model is automatically downloaded with a
   streaming progress bar. Partial downloads are written to a `.tmp`
   file and renamed atomically on completion.
-- `--global` sets the model in global config (`~/.config/debrief/`).
-- Without `--global`, sets the model in `.debrief/config.toml`
-  (shared with team).
 - Model binary files are cached at `{data_dir}/debrief/models/{model_name}/`
   where `data_dir` is the platform-standard data directory
   (`dirs::data_dir()`, e.g., `~/.local/share` on Linux,
   `~/Library/Application Support` on macOS). Never stored per-project.
-- Active model reference recorded in `.git/debrief/local-config.toml`.
-- Resolution order: local → project → global → default.
-- `set-embedding-model` validates the name against the known model
-  registry; unknown names are rejected with an error.
+- Validates the name against the known model registry; unknown names
+  are rejected with an error.
 
 **Supported models:**
 
@@ -361,6 +372,61 @@ to initialize, falls back to CPU silently.
 >   Arbitrary HuggingFace model names are not supported.
 > - GPU feature flags add build-time dependencies (CoreML framework,
 >   CUDA toolkit). Default build remains dependency-light.
+
+## 🚧 LLM Chunk Summarization
+
+Optional LLM-powered enrichment of overview chunks to improve
+structural semantic search quality. Uses an external
+OpenAI-compatible API endpoint (vLLM, ollama, etc.).
+
+### Configuration
+
+```
+cargo debrief config llm.endpoint "https://vllm.internal/v1" --global
+cargo debrief config llm.token "sk-..." --global
+cargo debrief config llm.model "qwen2.5-coder-7b" --global
+```
+
+```toml
+# config.toml
+[llm]
+endpoint = "https://vllm.internal/v1"
+token = "sk-..."
+model = "qwen2.5-coder-7b"
+```
+
+### Behavior
+
+- When `[llm]` config is present, `rebuild-index` generates a short
+  architectural summary for each **type overview chunk** via
+  `/v1/chat/completions`.
+- The summary is prepended to `embedding_text`, bridging the
+  vocabulary gap between user queries and code structure.
+- If the endpoint is unreachable or returns an error, indexing
+  continues without summaries (warning printed to stderr).
+- Summaries are cached in the index. Only chunks from changed files
+  are re-summarized on incremental re-index.
+- Function-level chunks are not summarized (too many, low ROI).
+
+### Scale
+
+Overview-only summarization keeps volume manageable:
+
+| Project size | Overview chunks | ~Tokens generated | Time @ 250 tok/s |
+|-------------|----------------|-------------------|-----------------|
+| Small (30 files) | ~60 | ~4,500 | ~18s |
+| Medium (100 files) | ~300 | ~22,500 | ~90s |
+| Large (500 files) | ~1,500 | ~112,500 | ~7.5 min |
+
+One-time cost per file; incremental re-index re-summarizes only
+changed files.
+
+> [!note] Constraints
+> - Requires an external LLM server — cargo-debrief does not bundle
+>   or run LLM inference locally.
+> - Summary quality depends on the model. Hallucinated summaries can
+>   degrade search quality. 7B+ code-specialized models recommended.
+> - The `/v1/chat/completions` endpoint must be OpenAI-compatible.
 
 ## Index Persistence
 

@@ -7,7 +7,7 @@ wrapper, all logic behind `lib.rs`):
 
 ```
 src/
-  main.rs       — CLI entrypoint (clap): rebuild-index, search, overview, set-embedding-model
+  main.rs       — CLI entrypoint (clap): rebuild-index, search, overview, config
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
   service.rs    — DebriefService trait (async RPITIT, project_root per method) + InProcessService (zero-sized)
@@ -43,8 +43,8 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
   against HEAD to find changed files. Prioritize validating this early.
 - **Rust-first, language-extensible**: Start with tree-sitter-rust. Chunker
   trait allows adding more languages later.
-- **Embedding model management**: auto-download default model, configurable
-  per-project or globally via `set-embedding-model`.
+- **Unified config**: `cargo debrief config <key> [value] [--global]`.
+  Replaces `set-embedding-model`. Manages embedding model, LLM endpoint, etc.
 
 ## Spec
 
@@ -64,7 +64,7 @@ CARGO_DEBRIEF_SKIP_NETWORK=1 cargo test              # skip network tests (no mo
 cargo run -- rebuild-index [<path>]                  # full re-index (manual/recovery)
 cargo run -- search "query" [--top-k N]              # vector search + metadata boosting (auto-indexes)
 cargo run -- overview <file>                         # file-level overview (auto-indexes)
-cargo run -- set-embedding-model [--global] <name>   # configure model
+cargo run -- config <key> [value] [--global]          # get/set configuration
 cargo run -- daemon status                           # check daemon
 ```
 
@@ -101,12 +101,14 @@ See `ai-docs/mental-model/` for operational knowledge:
 A  Usability test (ripgrep)        — validate search quality on real codebase
 C  Dependency chunking             — index transitive deps, public API only
 D* Daemon mode                     — per-workspace, temp-file RPC, ~3 min idle
+E  LLM chunk summarization         — external LLM for embedding text enrichment
 B  Rust chunking population        — additional node kinds, informed by A results
 D  C++/Python chunkers             — language expansion
 ```
 
 Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunking` (C),
-`260404-feat-daemon-mode` (D*), `260404-feat-rust-chunking-population` (B)
+`260404-feat-daemon-mode` (D*), `260404-feat-llm-chunk-summarization` (E),
+`260404-feat-rust-chunking-population` (B)
 
 ## Session Notes
 
