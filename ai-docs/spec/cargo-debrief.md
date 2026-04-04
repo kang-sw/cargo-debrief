@@ -230,7 +230,7 @@ On re-index, only files changed since the last indexed commit are
 re-parsed and re-embedded.
 
 - The index stores the `last_indexed_commit` hash.
-- Changed files are detected via `git diff --name-only <last_commit> HEAD`.
+- Changed files are detected via `git diff --name-status <last_commit> HEAD`.
 - Deleted files have their chunks removed from the index.
 - Non-git directories fall back to full re-indexing.
 
