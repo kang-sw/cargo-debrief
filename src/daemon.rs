@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::ipc;
 use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
@@ -152,7 +152,8 @@ async fn handle_request(
 /// A request from the IPC thread to the async service dispatcher.
 struct ServiceCall {
     request: DaemonRequest,
-    reply: oneshot::Sender<DaemonResponse>,
+    /// Channel for sending Progress keepalives and the final response back to the IPC thread.
+    reply: mpsc::Sender<DaemonResponse>,
 }
 
 /// Entry point for the daemon process. Called from `__daemon` CLI subcommand.
@@ -195,10 +196,35 @@ pub async fn run_daemon(project_root: &Path) -> Result<()> {
     // Async service dispatch loop: receive requests, process, send responses.
     let project_root = project_root.to_path_buf();
     while let Some(call) = rx.recv().await {
+        let reply_tx = call.reply;
+
+        // Spawn a timer task that sends Progress keepalives every 10s while the
+        // handler is running. This prevents the client from timing out on long
+        // operations such as rebuild-index.
+        let progress_tx = reply_tx.clone();
+        let timer = tokio::spawn(async move {
+            let interval = Duration::from_secs(10);
+            loop {
+                tokio::time::sleep(interval).await;
+                if progress_tx
+                    .send(DaemonResponse::Progress {
+                        message: "working...".into(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
         let (response, should_stop) =
             handle_request(call.request, &service, &project_root, start_time).await;
-        // Send response back to IPC thread (ignore if receiver dropped).
-        let _ = call.reply.send(response);
+
+        // Send final response, then stop the timer.
+        let _ = reply_tx.send(response).await;
+        timer.abort();
+
         if should_stop {
             break;
         }
@@ -243,7 +269,7 @@ fn ipc_loop(
                 last_activity = Instant::now();
                 let is_stop = matches!(request, DaemonRequest::Stop);
 
-                let (reply_tx, reply_rx) = oneshot::channel();
+                let (reply_tx, mut reply_rx) = mpsc::channel::<DaemonResponse>(4);
                 if tx
                     .blocking_send(ServiceCall {
                         request,
@@ -255,14 +281,24 @@ fn ipc_loop(
                     break;
                 }
 
-                match reply_rx.blocking_recv() {
-                    Ok(response) => {
-                        if let Err(e) = ipc_handle.send_response(&response) {
-                            eprintln!("[daemon] failed to write response: {e}");
+                // Forward Progress keepalives to the client, then send the final response.
+                loop {
+                    match reply_rx.blocking_recv() {
+                        Some(progress @ DaemonResponse::Progress { .. }) => {
+                            if let Err(e) = ipc_handle.send_response(&progress) {
+                                eprintln!("[daemon] failed to write progress: {e}");
+                            }
                         }
-                    }
-                    Err(_) => {
-                        eprintln!("[daemon] response channel closed");
+                        Some(response) => {
+                            if let Err(e) = ipc_handle.send_response(&response) {
+                                eprintln!("[daemon] failed to write response: {e}");
+                            }
+                            break;
+                        }
+                        None => {
+                            eprintln!("[daemon] response channel closed");
+                            break;
+                        }
                     }
                 }
 
@@ -472,7 +508,7 @@ pub fn auto_spawn_and_connect(project_root: &Path) -> Option<crate::service::Dae
     drop(lock_file);
 
     // Wait for readiness
-    if wait_for_readiness(&dir, Duration::from_secs(30)) {
+    if wait_for_readiness(&dir, Duration::from_secs(60)) {
         eprintln!("done.");
         let mut child = child;
         if let Ok(Some(status)) = child.try_wait() {

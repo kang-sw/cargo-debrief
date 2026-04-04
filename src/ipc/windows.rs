@@ -135,29 +135,38 @@ pub fn send_command(
     drop(req_file);
     fs::rename(&req_tmp, &req_path).context("failed to rename request file")?;
 
-    // 4. Poll for response with timeout
-    let now = Instant::now();
-    let deadline = now
-        .checked_add(timeout)
-        .unwrap_or(now + Duration::from_secs(86400 * 365));
+    // 4. Poll for response, looping on Progress keepalives.
+    // `timeout` is the per-message deadline — daemon sends Progress every 10s so any
+    // value ≥ 30s gives ample margin.
     loop {
-        if resp_path.exists() {
-            let mut file = File::open(&resp_path).context("failed to open response file")?;
-            let response: DaemonResponse = read_message(&mut file)?;
-            drop(file);
-            fs::remove_file(&resp_path).ok();
-            return Ok(response);
-        }
+        let msg_deadline = Instant::now() + timeout;
+        let response = loop {
+            if resp_path.exists() {
+                let mut file = File::open(&resp_path).context("failed to open response file")?;
+                let msg: DaemonResponse = read_message(&mut file)?;
+                drop(file);
+                fs::remove_file(&resp_path).ok();
+                break msg;
+            }
+            if Instant::now() >= msg_deadline {
+                bail!(
+                    "timed out waiting for daemon response ({}s per-message limit)",
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+        };
 
-        if Instant::now() >= deadline {
-            bail!(
-                "timed out waiting for daemon response ({}s)",
-                timeout.as_secs()
-            );
+        match response {
+            DaemonResponse::Progress { .. } => {
+                // Keepalive received — daemon is still working, continue waiting.
+            }
+            other => {
+                // lock auto-released on lock_file drop
+                return Ok(other);
+            }
         }
-        std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
     }
-    // lock auto-released on lock_file drop
 }
 
 /// Remove IPC-specific files.

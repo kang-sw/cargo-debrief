@@ -36,12 +36,28 @@ pub enum DaemonRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DaemonResponse {
-    Ok { message: String },
-    Status { pid: u32, uptime_secs: u64 },
+    Ok {
+        message: String,
+    },
+    Status {
+        pid: u32,
+        uptime_secs: u64,
+    },
     IndexResult(IndexResult),
-    SearchResults { results: Vec<SearchResult> },
-    Overview { content: String },
-    Error { message: String },
+    SearchResults {
+        results: Vec<SearchResult>,
+    },
+    Overview {
+        content: String,
+    },
+    Error {
+        message: String,
+    },
+    /// Keepalive sent by the daemon while a long operation is in progress.
+    /// The client resets its per-message timeout on receipt and continues waiting.
+    Progress {
+        message: String,
+    },
 }
 
 /// Write a length-prefixed JSON message to a stream.
@@ -194,6 +210,63 @@ mod tests {
             }
             _ => panic!("unexpected variant"),
         }
+    }
+
+    #[test]
+    fn roundtrip_progress_response() {
+        let resp = DaemonResponse::Progress {
+            message: "working...".to_string(),
+        };
+        let got: DaemonResponse = roundtrip(&resp);
+        match got {
+            DaemonResponse::Progress { message } => {
+                assert_eq!(message, "working...");
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn progress_then_final_response_sequence() {
+        // Verify that a client can read Progress messages followed by a final response
+        // from a single buffer, mimicking the keepalive loop behaviour.
+        let mut buf = Vec::new();
+        write_message(
+            &mut buf,
+            &DaemonResponse::Progress {
+                message: "working...".to_string(),
+            },
+        )
+        .unwrap();
+        write_message(
+            &mut buf,
+            &DaemonResponse::Progress {
+                message: "still working".to_string(),
+            },
+        )
+        .unwrap();
+        write_message(
+            &mut buf,
+            &DaemonResponse::Ok {
+                message: "done".to_string(),
+            },
+        )
+        .unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let mut progress_count = 0;
+        loop {
+            let msg: DaemonResponse = read_message(&mut cursor).unwrap();
+            match msg {
+                DaemonResponse::Progress { .. } => progress_count += 1,
+                DaemonResponse::Ok { message } => {
+                    assert_eq!(message, "done");
+                    break;
+                }
+                _ => panic!("unexpected variant"),
+            }
+        }
+        assert_eq!(progress_count, 2);
     }
 
     #[test]
