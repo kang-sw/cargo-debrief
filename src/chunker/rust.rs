@@ -902,8 +902,8 @@ pub enum Color {
             "missing load_config, got: {fn_names:?}"
         );
         assert!(
-            fn_names.contains(&"load_layer"),
-            "missing load_layer, got: {fn_names:?}"
+            fn_names.contains(&"load_layer_single"),
+            "missing load_layer_single, got: {fn_names:?}"
         );
 
         // Module path should be crate::config.
