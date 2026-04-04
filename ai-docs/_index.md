@@ -58,7 +58,7 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 
 ```bash
 cargo build
-cargo test                                           # unit (38) + offline integration (8) + network integration (3)
+cargo test                                           # unit (37) + offline integration (8) + network integration (3)
 CARGO_DEBRIEF_SKIP_NETWORK=1 cargo test              # skip network tests (no model download)
 cargo run -- rebuild-index [<path>]                  # full re-index (manual/recovery)
 cargo run -- search "query" [--top-k N]              # vector search + metadata boosting (auto-indexes)
@@ -76,6 +76,11 @@ cargo run -- daemon status                           # check daemon
 | Network integration | `tests/integration_network.rs` | Yes (~130MB model download, cached) | Real ONNX embedder + search, chunker→embedder compatibility, semantic search quality smoke tests |
 
 Network tests download `nomic-embed-text-v1.5` on first run to `~/.local/share/debrief/models/` (Linux) or `~/Library/Application Support/debrief/models/` (macOS). Cached after first download. Skip with `CARGO_DEBRIEF_SKIP_NETWORK=1`.
+
+### Smoke test
+
+See `ai-docs/smoke-test.md` for the manual CLI verification protocol.
+Run after changes to service wiring, chunker, embedder, search, or store.
 
 ## Mental Model
 
