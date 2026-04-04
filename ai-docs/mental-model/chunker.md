@@ -20,7 +20,7 @@
 
 - `RustChunker` takes `file_path: &Path` **relative to the crate root** (e.g. `src/foo.rs`). `derive_module_path` strips the `src/` prefix to build the Rust module path. Passing an absolute path silently produces a wrong `crate::` module name in `embedding_text` with no error.
 - `chunk::Chunk` is the output contract. Adding fields to `Chunk` requires updating both `build_overview_chunk` and `build_method_chunk`/`build_free_function_chunk` in `rust.rs`.
-- All chunks emitted by `RustChunker` carry `origin: ChunkOrigin::Project` (the `Default`). Phase 2 will introduce a separate code path for dependency sources that sets `ChunkOrigin::Dependency`; do not set it inside `RustChunker` directly.
+- All chunks emitted by `RustChunker` carry `origin: ChunkOrigin::Project` (the `Default`). A separate code path in `run_deps_index` (see `service.rs`) handles dependency sources and sets `ChunkOrigin::Dependency`; do not set it inside `RustChunker` directly.
 
 ## Extension Points & Change Recipes
 

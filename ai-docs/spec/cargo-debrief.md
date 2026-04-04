@@ -554,7 +554,7 @@ dependency types, traits, and functions alongside project code.
   Staleness tracked via `Cargo.lock` content hash — re-index only
   when dependencies change.
 - Each dependency chunk's `embedding_text` includes a root-dependency
-  annotation (e.g., `// Crate: bevy_ecs (dependency of: bevy)`) to
+  annotation (e.g., `[dependency] bevy_ecs (dependency of: bevy)`) to
   bridge the vocabulary gap between user queries and transitive dep
   names.
 - Git submodules treated as dependencies (not project source). Details

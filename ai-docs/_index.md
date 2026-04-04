@@ -10,13 +10,14 @@ src/
   main.rs       — CLI entrypoint (clap): rebuild-index, search, overview, config
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
+  deps.rs       — Dependency discovery (cargo metadata, BFS root-dep)
   service.rs    — DebriefService trait (async RPITIT, project_root per method) + InProcessService (zero-sized)
   chunk.rs      — Chunk data model (Chunk, ChunkMetadata, ChunkKind, ChunkType, Visibility)
   chunker/      — Chunker trait + RustChunker (tree-sitter AST-aware chunking)
     mod.rs      — Chunker trait definition
     rust.rs     — RustChunker: two-pass AST walk, impl aggregation, dual text generation
   git.rs        — Git file tracking (head_commit, changed_files via Command shellout)
-  store.rs      — Index serialization (IndexData, bincode + versioned header)
+  store.rs      — Index serialization (IndexData + DepsIndexData, bincode + versioned header)
   embedder.rs   — ONNX Runtime embedding: ModelRegistry, Embedder (load, embed_batch, mean pooling + L2 norm)
   search.rs     — Vector search: SearchIndex (hnsw_rs ANN + symbol-name metadata boosting)
   daemon.rs     — (Phase 2) daemon mode via CLI subcommand
@@ -99,8 +100,8 @@ See `ai-docs/mental-model/` for operational knowledge:
 ## Post-MVP Roadmap
 
 ```
-A  Usability test (ripgrep)        — validate search quality on real codebase
-C  Dependency chunking             — index transitive deps, public API only
+A✓ Usability test (ripgrep)        — validate search quality on real codebase
+C✓ Dependency chunking             — index transitive deps, public API only
 D* Daemon mode                     — per-workspace, temp-file RPC, ~3 min idle
 E  LLM chunk summarization         — external LLM for embedding text enrichment
 B  Rust chunking population        — additional node kinds, informed by A results
