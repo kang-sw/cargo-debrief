@@ -112,6 +112,18 @@ Bump `INDEX_VERSION`.
 - "command line argument parsing" returns structural results
   (Flag trait overview, HiArgs) not micro-impl accessors
 
+### Result (941a1d8) — 26-04-04
+
+Phase 2 implemented: methods ≤5 lines inlined (full body) into type
+overview chunks instead of separate function chunks. Free functions
+aggregated into new module overview chunk (`ChunkKind::Module`).
+`INDEX_VERSION` bumped to 3. All tests pass (37 unit + 8 integration).
+
+**Success criteria evaluation pending** — implementation complete but
+post-merge search quality eval against ripgrep not yet run. Expected:
+significant chunk count reduction in flag-heavy files (e.g., `defs.rs`)
+and improved overview chunk ranking.
+
 ## Phase 3 — P2: Overview Ordering + Search Output UX
 
 **P3 (progress feedback) completed in Phase 1** — `eprint!(".")`
@@ -130,6 +142,23 @@ cargo-brief output format comparison.
 
 - `overview src/standard.rs` shows `Standard<W>` before `Config`
 - Search results include module path context line
+
+### Result (3151029) — 26-04-04
+
+Phase 3 implemented across two sub-tasks:
+
+**P2 (overview ordering):** Overview chunks sorted by visibility —
+`Pub` → `PubCrate` → `PubSuper` → `Private`. Stable sort preserves
+file order within each tier.
+
+**P4 (search module context):** `SearchResult` gains `module_path`
+field, populated by `extract_module_path()` parsing `embedding_text`
+first line. CLI prints `// in {module}` before each result's
+display_text. Code review caught wrong `strip_prefix` (`"/ "` vs
+`"// "`) — fixed before merge (8178e03). 3 unit tests added for
+`extract_module_path`.
+
+**Success criteria evaluation pending** — requires ripgrep test run.
 
 ## Known Limitations (Not Addressed)
 

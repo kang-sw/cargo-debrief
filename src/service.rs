@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::{
-    chunk::{Chunk, ChunkType},
+    chunk::{Chunk, ChunkType, Visibility},
     chunker::{Chunker, RustChunker},
     config::{config_paths, load_config, save_config},
     embedder::{Embedder, ModelRegistry},
@@ -26,6 +26,7 @@ pub struct SearchResult {
     pub line_range: (usize, usize),
     pub score: f64,
     pub display_text: String,
+    pub module_path: String,
 }
 
 /// Service boundary between CLI and core logic.
@@ -317,9 +318,20 @@ impl DebriefService for InProcessService {
             .get(&file_key)
             .ok_or_else(|| anyhow::anyhow!("no index entry for {}", file.display()))?;
 
-        let overview_text: String = chunks
+        let mut overview_chunks: Vec<&Chunk> = chunks
             .iter()
             .filter(|c| c.metadata.chunk_type == ChunkType::Overview)
+            .collect();
+
+        overview_chunks.sort_by_key(|c| match c.metadata.visibility {
+            Visibility::Pub => 0,
+            Visibility::PubCrate => 1,
+            Visibility::PubSuper => 2,
+            Visibility::Private => 3,
+        });
+
+        let overview_text: String = overview_chunks
+            .iter()
             .map(|c| c.display_text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
