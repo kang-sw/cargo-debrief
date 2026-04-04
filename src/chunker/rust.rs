@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tree_sitter::{Node, Parser};
 
-use crate::chunk::{Chunk, ChunkKind, ChunkMetadata, ChunkType, Visibility};
+use crate::chunk::{Chunk, ChunkKind, ChunkMetadata, ChunkOrigin, ChunkType, Visibility};
 
 use super::Chunker;
 
@@ -480,6 +480,7 @@ impl<'a> ChunkCollector<'a> {
                 signature,
             },
             embedding: None,
+            origin: ChunkOrigin::default(),
         }
     }
 
@@ -540,6 +541,7 @@ impl<'a> ChunkCollector<'a> {
                 signature: Some(signature),
             },
             embedding: None,
+            origin: ChunkOrigin::default(),
         }
     }
 
@@ -602,6 +604,7 @@ impl<'a> ChunkCollector<'a> {
                 signature: None,
             },
             embedding: None,
+            origin: ChunkOrigin::default(),
         }
     }
 
@@ -659,6 +662,7 @@ impl<'a> ChunkCollector<'a> {
                 signature: Some(signature),
             },
             embedding: None,
+            origin: ChunkOrigin::default(),
         }
     }
 }
