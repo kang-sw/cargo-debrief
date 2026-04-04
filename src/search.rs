@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use hnsw_rs::prelude::*;
 
-use crate::chunk::Chunk;
+use crate::chunk::{Chunk, ChunkOrigin};
 use crate::embedder::Embedder;
 use crate::service::SearchResult;
 
@@ -11,6 +11,8 @@ use crate::service::SearchResult;
 const EXACT_SYMBOL_MATCH_BOOST: f64 = 0.3;
 /// Score boost applied when query text partially matches a chunk's symbol name (substring, case-insensitive).
 const PARTIAL_SYMBOL_MATCH_BOOST: f64 = 0.1;
+/// Score penalty applied to chunks from dependency crates to prefer project results when equally relevant.
+const DEP_ORIGIN_PENALTY: f64 = 0.1;
 
 const HNSW_MAX_CONNECTIONS: usize = 16;
 const HNSW_MAX_LAYERS: usize = 16;
@@ -91,6 +93,7 @@ impl SearchIndex {
                 let raw_similarity = (1.0_f64 - n.distance as f64).clamp(0.0_f64, 1.0_f64);
                 let score =
                     apply_symbol_boost(raw_similarity, query_text, &chunk.metadata.symbol_name);
+                let score = apply_dep_penalty(score, &chunk.origin);
 
                 SearchResult {
                     file_path: chunk.metadata.file_path.clone(),
@@ -98,6 +101,7 @@ impl SearchIndex {
                     score,
                     display_text: chunk.display_text.clone(),
                     module_path: extract_module_path(&chunk.embedding_text),
+                    origin: chunk.origin.clone(),
                 }
             })
             .collect();
@@ -140,6 +144,15 @@ fn extract_module_path(embedding_text: &str) -> String {
         after_slash[..paren_pos].to_string()
     } else {
         after_slash.to_string()
+    }
+}
+
+/// Apply a score penalty to dependency chunks to prefer project results
+/// when cosine similarity is otherwise equal.
+fn apply_dep_penalty(score: f64, origin: &ChunkOrigin) -> f64 {
+    match origin {
+        ChunkOrigin::Dependency { .. } => score - DEP_ORIGIN_PENALTY,
+        ChunkOrigin::Project => score,
     }
 }
 
@@ -300,5 +313,76 @@ mod tests {
         // Single slash format — should return empty string, not a malformed value.
         let text = "/ crate::foo (src/foo.rs:1..42)\nfn bar() {}";
         assert_eq!(extract_module_path(text), "");
+    }
+
+    fn make_dep_chunk(symbol_name: &str, file_path: &str, embedding: Option<Vec<f32>>) -> Chunk {
+        Chunk {
+            display_text: format!("fn {}() {{}}", symbol_name),
+            embedding_text: symbol_name.to_string(),
+            metadata: crate::chunk::ChunkMetadata {
+                symbol_name: symbol_name.to_string(),
+                kind: crate::chunk::ChunkKind::Function,
+                chunk_type: crate::chunk::ChunkType::Function,
+                parent: None,
+                visibility: crate::chunk::Visibility::Pub,
+                file_path: file_path.to_string(),
+                line_range: (1, 5),
+                signature: None,
+            },
+            embedding,
+            origin: ChunkOrigin::Dependency {
+                crate_name: "some-dep".to_string(),
+                crate_version: "1.0.0".to_string(),
+                root_deps: vec!["some-dep".to_string()],
+            },
+        }
+    }
+
+    #[test]
+    fn test_dep_penalty_applied() {
+        // Both chunks aligned with query — same raw similarity.
+        // Dep chunk should rank lower due to penalty.
+        let query = unit_vec(1.0, 0.0, 0.0);
+
+        let project_chunk = make_chunk("func_p", "src/p.rs", Some(unit_vec(1.0, 0.0, 0.0)));
+        let dep_chunk = make_dep_chunk("func_d", "src/d.rs", Some(unit_vec(1.0, 0.0, 0.0)));
+
+        let index = SearchIndex::build(vec![
+            (PathBuf::from("src/p.rs"), project_chunk),
+            (PathBuf::from("src/d.rs"), dep_chunk),
+        ])
+        .unwrap();
+
+        let results = index.search_by_vector(&query, None, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].file_path, "src/p.rs",
+            "project chunk should rank first"
+        );
+        assert!(
+            results[0].score > results[1].score,
+            "project score should be higher than dep score"
+        );
+        assert!(
+            (results[0].score - results[1].score - DEP_ORIGIN_PENALTY).abs() < 1e-9,
+            "score difference should equal DEP_ORIGIN_PENALTY"
+        );
+    }
+
+    #[test]
+    fn test_dep_penalty_does_not_affect_project_chunks() {
+        let query = unit_vec(1.0, 0.0, 0.0);
+        let chunk = make_chunk("func_p", "src/p.rs", Some(unit_vec(1.0, 0.0, 0.0)));
+        let index = SearchIndex::build(vec![(PathBuf::from("src/p.rs"), chunk)]).unwrap();
+
+        let results = index.search_by_vector(&query, None, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        // Cosine similarity of identical unit vectors = 1.0 (distance = 0.0).
+        let expected_score = 1.0_f64;
+        assert!(
+            (results[0].score - expected_score).abs() < 1e-6,
+            "project chunk score should be raw similarity without penalty, got {}",
+            results[0].score
+        );
     }
 }
