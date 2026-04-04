@@ -17,6 +17,7 @@ features:
     - Metadata Score Boosting
   - Overview
   - Embedding Model Management
+    - 🚧 GPU Acceleration
   - Index Persistence
   - 🚧 Daemon Mode
   - 🚧 MCP Server
@@ -341,11 +342,25 @@ cargo debrief set-embedding-model [--global] <model-name>
 | `nomic-embed-text-v1.5` (default) | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` |
 | `bge-large-en-v1.5` | 1024 | 512 | `BAAI/bge-large-en-v1.5` |
 
+### 🚧 GPU Acceleration
+
+ONNX Runtime execution provider selection with GPU-first, CPU-fallback:
+
+- **macOS**: CoreML (Neural Engine / GPU)
+- **Linux/Windows**: CUDA (NVIDIA GPU)
+- **Fallback**: CPU (always available)
+
+Enabled via cargo feature flags (`gpu`, `cuda`). Default build is
+CPU-only. Provider selection is automatic — if the GPU provider fails
+to initialize, falls back to CPU silently.
+
 > [!note] Constraints
 > - Changing the model invalidates the existing index — a full re-index
 >   is required after switching models.
 > - Only models listed in the built-in registry are accepted.
 >   Arbitrary HuggingFace model names are not supported.
+> - GPU feature flags add build-time dependencies (CoreML framework,
+>   CUDA toolkit). Default build remains dependency-light.
 
 ## Index Persistence
 
@@ -367,25 +382,31 @@ Stored in `.git/debrief/` (local, not committed).
 
 ## 🚧 Daemon Mode
 
-Background service that keeps the index loaded in memory for fast
-repeated queries. **Default execution mode** — CLI connects to the
-daemon for all operations. In-process mode is the fallback when the
-daemon is unavailable.
+Per-workspace background process that keeps the ONNX model session and
+HNSW index loaded in memory, eliminating ~2-4 seconds of startup
+overhead on repeated CLI calls. In-process mode is the fallback when
+the daemon is unavailable.
 
+- **Per-workspace.** One daemon per project root (not system-wide).
 - First CLI invocation transparently spawns the daemon if not running.
-- Daemon serves all CLI requests on the machine (per-machine singleton).
-- A single daemon instance serves **multiple workspaces** — each
-  request carries the project root, and the daemon manages per-workspace
-  state internally.
-- Auto-expires after a configurable idle timeout.
+- **~3 minute idle expiry.** Short lifespan — purpose is eliminating
+  delay during burst usage (e.g., AI agent sessions), not long-term
+  persistence.
+- **Temp-file-based RPC.** Avoids sandbox restrictions that affect Unix
+  sockets and named pipes. Request/response via temp files in a known
+  directory.
+- **Discovery.** PID file in `.git/debrief/` (workspace-local).
 - CLI detects daemon availability and falls back to in-process mode
   if the daemon is not running or cannot be spawned.
+- In debug builds, CLI compares binary identity with the running daemon
+  and kills/restarts on mismatch to prevent stale daemon processes
+  during development.
 
 > [!note] Constraints
-> - IPC mechanism TBD (Unix domain socket, named pipe, or localhost HTTP).
 > - Phase 1 uses in-process execution (no daemon). The `DebriefService`
 >   trait accepts a project root per operation, so the switch to daemon
->   mode is transparent — daemon simply routes by project root internally.
+>   mode is transparent.
+> - Temp-file RPC protocol details TBD.
 
 ## 🚧 MCP Server
 
@@ -415,40 +436,54 @@ Tree-sitter-based parsing with per-language grammar support.
 
 ## 🚧 Dependency Indexing
 
-Index public API skeletons of project dependencies for improved
-search coverage. Deferred — not part of initial implementation.
+Index public API surfaces of project dependencies so that search covers
+dependency types, traits, and functions alongside project code.
 
-```
-cargo debrief rebuild-index . --with-deps
-```
+- Indexes **all transitive dependencies**, public API items only.
+  Indexing all transitive deps avoids the need to resolve `pub use`
+  re-export chains — facade crates (e.g., `bevy`) are covered
+  naturally because their sub-crates are all in the transitive set.
+- Source discovery via `cargo metadata` (Rust). Each package's
+  `manifest_path` locates its source files.
+- Dependency index stored separately (`.git/debrief/deps-index.bin`).
+  Staleness tracked via `Cargo.lock` content hash — re-index only
+  when dependencies change.
+- Search merges project and dependency indexes. Project chunks receive
+  a score boost over dependency chunks to prevent crowding.
+- Each dependency chunk's `embedding_text` includes a root-dependency
+  annotation (e.g., `// Crate: bevy_ecs (dependency of: bevy)`) to
+  bridge the vocabulary gap between user queries and transitive dep
+  names.
+- Git submodules treated as dependencies (not project source). Details
+  deferred to C++ chunker stage.
 
-- Indexes **direct dependencies only** (not transitive).
-- **Skeleton only** — public type signatures, no function bodies.
-- Dependency chunks receive a lower base score than project code,
-  so project results always rank higher by default.
+```toml
+# .debrief/config.toml
+[dependencies]
+exclude = ["syn", "proc-macro2"]  # skip large, rarely searched crates
+```
 
 ### 🚧 Language-Specific Dependency Detection
 
 | Language | Auto-detection | Fallback |
 |----------|---------------|----------|
-| **Rust** | `cargo metadata` → dep locations + public API | — |
+| **Rust** | `cargo metadata` → dep source paths + public API filtering | — |
 | **C++** | `compile_commands.json` → include paths | `debrief dep cpp-include <path>` |
 | **Python** | Active venv `site-packages` + `.pyi` stubs | `debrief dep py-packages <venv-path>` |
 
-- Rust: fully automatic via `cargo metadata`. Rustdoc JSON output
-  may provide more accurate public API extraction than tree-sitter.
+- Rust: fully automatic via `cargo metadata`. Public API filtered by
+  `pub` visibility on chunks (tree-sitter based).
 - C++: `compile_commands.json` (generated by CMake) is the primary
-  source. Visual Studio `.vcxproj` parsing is possible but complex.
-  Manual fallback via CLI command for unsupported build systems.
+  source. Git submodules treated as dependencies. Manual fallback via
+  CLI command for unsupported build systems.
 - Python: detect active virtualenv and index installed packages.
   `.pyi` type stubs are preferred over source when available.
 
-Shared dependency paths go in `.debrief/config.toml` (git-tracked).
-Machine-specific paths go in `.git/debrief/local-config.toml`.
-
 > [!note] Constraints
-> - Dependency skeletons can add ~5K-10K chunks to the index.
->   At project scale (~20K total) this is within hnsw_rs capacity.
+> - Transitive dep indexing can produce ~1.5K-10K chunks depending on
+>   project size. Within hnsw_rs capacity at all scales.
 > - Proc macro generated APIs are not visible to tree-sitter and
 >   will not be indexed.
-> - Deferred until core project-code search quality is validated.
+> - `Cargo.lock`-level staleness means all deps are re-indexed on any
+>   dependency change. Per-package incremental re-indexing is a future
+>   optimization.
