@@ -16,6 +16,7 @@
 | `git` | `src/git.rs` | Git file tracking via `Command` shellout |
 | `store` | `src/store.rs` | Versioned index serialization (bincode) |
 | `embedder` | `src/embedder.rs` | ONNX embedding pipeline: model registry, download, inference |
+| `deps` | `src/deps.rs` | Cargo metadata parsing; dependency package discovery with root-dep reachability |
 | `search` | `src/search.rs` | Vector ANN search (hnsw_rs) with metadata score boosting |
 
 ## Module Contracts
@@ -28,6 +29,7 @@
 - **lib.rs is the integration-test boundary.** New modules must be declared in `lib.rs`, not inlined in `main.rs`, to be testable without spawning a subprocess.
 - **Async runtime choice is load-bearing.** The service trait uses RPITIT (`impl Future` in trait) rather than the `async-trait` crate. Changing to `async-trait` later would make the trait object-safe but require a crate dep and macro overhead.
 - **`chunk` is a shared data contract.** Both `chunker` and `store` depend on `chunk::Chunk`. Adding or renaming fields in `Chunk` requires updating both and bumping `store::INDEX_VERSION`.
+- **`deps` is a standalone discovery module.** `discover_dependency_packages` shells out to `cargo metadata` and returns `DepPackageInfo` values. Phase 2 will wire results into `ChunkOrigin::Dependency`; in Phase 1 all chunks still carry `ChunkOrigin::Project` (default).
 
 ## Technical Debt
 
