@@ -1,5 +1,7 @@
 ---
 title: "Core indexing pipeline — chunking, git tracking, persistence"
+started: 2026-04-04
+completed: 2026-04-04
 parent: 260403-epic-mvp-implementation
 related:
   - 260404-feat-cli-scaffold-config-service  # prerequisite — Config, DebriefService
