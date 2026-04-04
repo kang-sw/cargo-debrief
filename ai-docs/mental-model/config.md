@@ -23,6 +23,10 @@
 2. Add a branch to `Config::merge` — if you forget this step, the new field silently ignores all config layers and always returns its default value regardless of what is written in any config file.
 3. Add a `set_<field>` subcommand or update `SetEmbeddingModel` if the field needs CLI write support.
 
+**Writing a config layer (e.g. from a service method):**
+
+Use `load_layer_single(path)?.unwrap_or_default()` to read the existing layer (or start empty), mutate the specific field, then `save_config(path, &config)`. `save_config` creates parent directories automatically and serializes `None` fields as absent TOML keys. Do not call `load_config` (multi-layer merge) when you only intend to write a single layer — that would collapse all layers into one file.
+
 ## Common Mistakes
 
 - **Missing merge branch for a new field.** If `Config::merge` is not updated when a new field is added, higher-priority layers (project, local) silently have no effect on that field. No error is raised.

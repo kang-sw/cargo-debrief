@@ -71,7 +71,7 @@ pub fn config_paths(project_root: &Path) -> ConfigPaths {
 }
 
 /// Load a single TOML config file. Returns `None` if the file does not exist.
-fn load_layer(path: &Path) -> Result<Option<Config>> {
+pub fn load_layer_single(path: &Path) -> Result<Option<Config>> {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
             let config: Config = toml::from_str(&contents)
@@ -83,6 +83,19 @@ fn load_layer(path: &Path) -> Result<Option<Config>> {
     }
 }
 
+/// Write `config` to `path` as TOML, creating parent directories if needed.
+/// `None` fields are omitted from the output.
+pub fn save_config(path: &Path, config: &Config) -> Result<()> {
+    let contents = toml::to_string_pretty(config).context("failed to serialize config")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write config to {}", path.display()))?;
+    Ok(())
+}
+
 /// Load and merge configuration from all layers.
 ///
 /// Resolution order: built-in default → global → project → local.
@@ -91,19 +104,19 @@ pub fn load_config(paths: &ConfigPaths) -> Result<Config> {
     let mut config = Config::default();
 
     if let Some(ref path) = paths.global
-        && let Some(layer) = load_layer(path)?
+        && let Some(layer) = load_layer_single(path)?
     {
         config.merge(layer);
     }
 
     if let Some(ref path) = paths.project
-        && let Some(layer) = load_layer(path)?
+        && let Some(layer) = load_layer_single(path)?
     {
         config.merge(layer);
     }
 
     if let Some(ref path) = paths.local
-        && let Some(layer) = load_layer(path)?
+        && let Some(layer) = load_layer_single(path)?
     {
         config.merge(layer);
     }
@@ -225,5 +238,38 @@ mod tests {
             err.to_string().contains("bad.toml"),
             "error should mention file path: {err}"
         );
+    }
+
+    #[test]
+    fn save_config_round_trips_model_name() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+
+        let config = Config {
+            embedding_model: Some("test-model".into()),
+        };
+        save_config(&path, &config)?;
+
+        let paths = ConfigPaths {
+            global: Some(path),
+            project: None,
+            local: None,
+        };
+        let loaded = load_config(&paths)?;
+        assert_eq!(loaded.embedding_model.as_deref(), Some("test-model"));
+        Ok(())
+    }
+
+    #[test]
+    fn save_config_creates_parent_dirs() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("nested").join("dirs").join("config.toml");
+
+        let config = Config {
+            embedding_model: Some("test-model".into()),
+        };
+        save_config(&path, &config)?;
+        assert!(path.exists());
+        Ok(())
     }
 }

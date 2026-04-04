@@ -9,7 +9,7 @@
 
 - `DebriefService` is **not object-safe**. It uses RPITIT (`impl Future<Output = ...> + Send` in trait methods). `Box<dyn DebriefService>` is a compile error.
 - Every trait method receives `project_root: &Path` as its **first parameter**. This enables a single service instance (or daemon) to serve multiple workspaces without construction-time binding.
-- `InProcessService` is a **zero-sized type** — no fields. Config is resolved from `project_root` per call when methods are fully implemented (currently stubs).
+- `InProcessService` is a **zero-sized type** — no fields. Config is resolved from `project_root` per call.
 - `main.rs` resolves `project_root` from `std::env::current_dir()` and passes it to every service call. Config loading has been removed from `main.rs`.
 - The trait requires all returned futures to be `Send`, enforcing that implementations must be usable in a multi-threaded tokio runtime.
 
@@ -40,6 +40,7 @@ pub trait DebriefService {
 **Implementing a method body in InProcessService:**
 
 - Call `crate::config::config_paths(project_root)` then `crate::config::load_config(&paths)` to derive config.
+- To write config, call `crate::config::load_layer_single(&target_path)?.unwrap_or_default()`, mutate, then `crate::config::save_config(&target_path, &config)`. See `set_embedding_model` as the reference implementation.
 - No caching at the struct level — config is small and resolution is cheap.
 
 **Adding Phase 2 DaemonClient:**

@@ -17,8 +17,8 @@ src/
     rust.rs     — RustChunker: two-pass AST walk, impl aggregation, dual text generation
   git.rs        — Git file tracking (head_commit, changed_files via Command shellout)
   store.rs      — Index serialization (IndexData, bincode + versioned header)
-  embedder.rs   — (planned) ONNX Runtime embedding inference + model management
-  search.rs     — (planned) vector search + metadata score boosting
+  embedder.rs   — ONNX Runtime embedding: ModelRegistry, Embedder (load, embed_batch, mean pooling + L2 norm)
+  search.rs     — Vector search: SearchIndex (hnsw_rs ANN + symbol-name metadata boosting)
   daemon.rs     — (Phase 2) daemon mode via CLI subcommand
 ```
 
@@ -58,13 +58,24 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 
 ```bash
 cargo build
-cargo test
+cargo test                                           # unit (38) + offline integration (8) + network integration (3)
+CARGO_DEBRIEF_SKIP_NETWORK=1 cargo test              # skip network tests (no model download)
 cargo run -- index [<path>]                          # index current directory
 cargo run -- search "query" [--top-k N]              # vector search + metadata boosting
 cargo run -- get-skeleton <file>                     # file-level overview
 cargo run -- set-embedding-model [--global] <name>   # configure model
 cargo run -- daemon status                           # check daemon
 ```
+
+### Test architecture
+
+| Layer | File(s) | Network | What it covers |
+|-------|---------|---------|----------------|
+| Unit tests | `src/*.rs` `#[cfg(test)]` | No | Module internals: config merge, chunker AST, store round-trip, model registry, HNSW search with fake vectors |
+| Offline integration | `tests/integration.rs` | No | Cross-module boundaries with mock embedder: chunker→store round-trip, search with mock embeddings, config multi-layer merge, git→chunker pipeline |
+| Network integration | `tests/integration_network.rs` | Yes (~130MB model download, cached) | Real ONNX embedder + search, chunker→embedder compatibility, semantic search quality smoke tests |
+
+Network tests download `nomic-embed-text-v1.5` on first run to `~/.local/share/debrief/models/` (Linux) or `~/Library/Application Support/debrief/models/` (macOS). Cached after first download. Skip with `CARGO_DEBRIEF_SKIP_NETWORK=1`.
 
 ## Mental Model
 
@@ -75,6 +86,8 @@ See `ai-docs/mental-model/` for operational knowledge:
 - `chunker.md` — two-pass design, impl aggregation, orphan impl handling
 - `store.md` — bincode serialization, version mismatch semantics
 - `git.md` — Command shellout, changed_files contract
+- `embedder.md` — ModelRegistry, Embedder, ONNX inference, model download
+- `search.md` — SearchIndex, hnsw_rs ANN, metadata boosting
 
 ## Session Notes
 
@@ -82,3 +95,4 @@ See `ai-docs/mental-model/` for operational knowledge:
 - Phase 1A scaffold implemented: CLI, config, service trait.
 - Phase 1B core indexing pipeline implemented: chunk model, tree-sitter Rust chunking, git tracking, index serialization.
 - Service trait refactored: `project_root: &Path` added to all `DebriefService` methods; `InProcessService` is now zero-sized; config loading removed from `main.rs`.
+- Phase 1C search pipeline implemented: embedder.rs (ONNX inference via ort, model registry with nomic-embed-text-v1.5 + bge-large-en-v1.5, streaming download, mean pooling + L2 norm), search.rs (hnsw_rs ANN, metadata symbol-name boosting), config save_config, set_embedding_model wired.

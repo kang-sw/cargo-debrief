@@ -131,4 +131,27 @@ Versions are approximate — verify latest at implementation time.
 
 ## Result
 
-(to be filled on completion)
+### Phase 1C — Search Pipeline (completed 2026-04-04)
+
+**Embedding pipeline** (`src/embedder.rs`, 374 lines):
+- `ModelRegistry` with two models: `nomic-embed-text-v1.5` (768-dim, default) and `bge-large-en-v1.5` (1024-dim)
+- `Embedder::load` — downloads ONNX model + tokenizer.json from HuggingFace with streaming progress bar, atomic `.tmp` rename
+- `Embedder::embed_batch` — tokenization via `tokenizers` crate, ONNX inference via `ort` 2.0.0-rc.12, mean pooling + L2 normalization
+- `Mutex<Session>` for `&self` embed calls (serializes concurrent inference — acceptable for Phase 1)
+- `config::save_config` added; `load_layer` made public as `load_layer_single`
+- `InProcessService::set_embedding_model` implemented: validates against registry, load-set-save config layer
+
+**Vector search** (`src/search.rs`, 262 lines):
+- `SearchIndex::build` — filters to embedded chunks, builds `hnsw_rs::Hnsw` with `DistCosine`
+- `SearchIndex::search_by_vector` — ANN search with over-fetch (`top_k*2`), additive metadata boosting (+0.3 exact symbol match, +0.1 partial), re-sort and truncate
+- `SearchIndex::search` — wraps `search_by_vector` with Embedder query embedding
+- HNSW params: 16 connections, 16 layers, ef_construction=200, ef_search=50
+
+**New dependencies**: `ort`, `tokenizers`, `reqwest`, `indicatif`, `futures-util`, `hnsw_rs`
+
+**Tests**: 38 passing, 2 ignored (network-gated model download). 6 new tests added.
+
+**Deviations from ticket**:
+- `ort` pinned to `2.0.0-rc.12` (pre-release; cargo rejects `"^2"`)
+- `ndarray` not needed — used tuple tensor construction instead
+- Model named `nomic-embed-text-v1.5` (no separate `nomic-embed-code` ONNX export exists)
