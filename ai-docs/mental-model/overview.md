@@ -31,5 +31,5 @@
 
 ## Technical Debt
 
-- `index`, `search`, and `get_skeleton` on `InProcessService` are still stubs that return `anyhow::bail!`. Only `set_embedding_model` is fully implemented.
+- `index`, `search`, and `overview` on `InProcessService` are still stubs that return `anyhow::bail!`. Only `set_embedding_model` is fully implemented.
 - `find_git_root` does not support git worktrees or submodules (`.git` file vs. directory). See `config.md`.

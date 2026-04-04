@@ -15,7 +15,7 @@ features:
   - 🚧 Code Search
     - Vector Similarity Search
     - Metadata Score Boosting
-  - 🚧 File Skeleton
+  - 🚧 Overview
   - Embedding Model Management
   - 🚧 Index Persistence
   - 🚧 Daemon Mode
@@ -90,13 +90,17 @@ tree-sitter into semantically meaningful chunks and generates vector
 embeddings for each chunk.
 
 ```
-cargo debrief index [<path>]
+cargo debrief rebuild-index [<path>]
 ```
 
 - `<path>` defaults to the current directory.
 - On first run, performs a full index of all supported source files.
 - On subsequent runs, performs incremental re-indexing (see below).
 - Index is stored in `.git/debrief/index.bin`.
+- `rebuild-index` is the explicit manual command. `search` and `overview`
+  automatically check index freshness and re-index before executing
+  (implicit auto-indexing) — `rebuild-index` is reserved for forced
+  full re-index or recovery scenarios.
 
 ### 🚧 AST-Aware Chunking
 
@@ -251,6 +255,8 @@ cargo debrief search <query> [--top-k N]
   score, and chunk metadata.
 - Each result returns the chunk's `display_text`. Embeddings are
   computed from `embedding_text` (which includes additional context).
+- Automatically checks index freshness and re-indexes if needed before
+  searching (implicit auto-indexing).
 
 ### Vector Similarity Search
 
@@ -290,18 +296,20 @@ a separate symbol lookup command or BM25 keyword index.
 > - BM25 keyword search may be added later if metadata boosting
 >   proves insufficient for exact-match queries.
 
-## 🚧 File Skeleton
+## 🚧 Overview
 
 Retrieve a file-level overview showing only declarations and signatures.
 
 ```
-cargo debrief get-skeleton <file>
+cargo debrief overview <file>
 ```
 
 - Shows struct/enum/trait definitions, function signatures, impl blocks —
   but not function bodies.
 - Useful for understanding a file's API surface without reading the
   full implementation.
+- Automatically checks index freshness and re-indexes if needed before
+  retrieving the overview (implicit auto-indexing).
 
 ## Embedding Model Management
 
@@ -385,7 +393,7 @@ MCP (Model Context Protocol) server exposing the same capabilities as
 the CLI for direct LLM integration. Deferred beyond Phase 2.
 
 - Will be layered on the daemon as an additional interface.
-- Planned tools: `search_code`, `get_skeleton`, `index_project`.
+- Planned tools: `search_code`, `overview`, `index_project`.
 
 > [!note] Constraints
 > - MCP SDK choice deferred. Will evaluate when implementation begins.
@@ -411,7 +419,7 @@ Index public API skeletons of project dependencies for improved
 search coverage. Deferred — not part of initial implementation.
 
 ```
-cargo debrief index . --with-deps
+cargo debrief rebuild-index . --with-deps
 ```
 
 - Indexes **direct dependencies only** (not transitive).

@@ -19,7 +19,7 @@
 pub trait DebriefService {
     fn index(&self, project_root: &Path, path: &Path) -> impl Future<Output = Result<IndexResult>> + Send;
     fn search(&self, project_root: &Path, query: &str, top_k: usize) -> impl Future<Output = Result<Vec<SearchResult>>> + Send;
-    fn get_skeleton(&self, project_root: &Path, file: &Path) -> impl Future<Output = Result<String>> + Send;
+    fn overview(&self, project_root: &Path, file: &Path) -> impl Future<Output = Result<String>> + Send;
     fn set_embedding_model(&self, project_root: &Path, model: &str, global: bool) -> impl Future<Output = Result<()>> + Send;
 }
 ```

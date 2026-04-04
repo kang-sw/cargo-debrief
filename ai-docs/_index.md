@@ -7,7 +7,7 @@ wrapper, all logic behind `lib.rs`):
 
 ```
 src/
-  main.rs       — CLI entrypoint (clap): index, search, get-skeleton, set-embedding-model
+  main.rs       — CLI entrypoint (clap): rebuild-index, search, overview, set-embedding-model
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
   service.rs    — DebriefService trait (async RPITIT, project_root per method) + InProcessService (zero-sized)
@@ -60,9 +60,9 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 cargo build
 cargo test                                           # unit (38) + offline integration (8) + network integration (3)
 CARGO_DEBRIEF_SKIP_NETWORK=1 cargo test              # skip network tests (no model download)
-cargo run -- index [<path>]                          # index current directory
-cargo run -- search "query" [--top-k N]              # vector search + metadata boosting
-cargo run -- get-skeleton <file>                     # file-level overview
+cargo run -- rebuild-index [<path>]                  # full re-index (manual/recovery)
+cargo run -- search "query" [--top-k N]              # vector search + metadata boosting (auto-indexes)
+cargo run -- overview <file>                         # file-level overview (auto-indexes)
 cargo run -- set-embedding-model [--global] <name>   # configure model
 cargo run -- daemon status                           # check daemon
 ```
