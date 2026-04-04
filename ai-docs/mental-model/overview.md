@@ -29,9 +29,9 @@
 - **lib.rs is the integration-test boundary.** New modules must be declared in `lib.rs`, not inlined in `main.rs`, to be testable without spawning a subprocess.
 - **Async runtime choice is load-bearing.** The service trait uses RPITIT (`impl Future` in trait) rather than the `async-trait` crate. Changing to `async-trait` later would make the trait object-safe but require a crate dep and macro overhead.
 - **`chunk` is a shared data contract.** Both `chunker` and `store` depend on `chunk::Chunk`. Adding or renaming fields in `Chunk` requires updating both and bumping `store::INDEX_VERSION`.
-- **`deps` is a standalone discovery module.** `discover_dependency_packages` shells out to `cargo metadata` and returns `DepPackageInfo` values. Phase 2 will wire results into `ChunkOrigin::Dependency`; in Phase 1 all chunks still carry `ChunkOrigin::Project` (default).
+- **`deps` is a standalone discovery module consumed by `service`.** `discover_dependency_packages` shells out to `cargo metadata` and returns `DepPackageInfo` values. `service.rs::run_deps_index` consumes these to produce `DepsIndexData` stored at `.git/debrief/deps-index.bin`. Dep chunks carry `ChunkOrigin::Dependency`; project chunks carry `ChunkOrigin::Project`.
 
 ## Technical Debt
 
 - `find_git_root` does not support git worktrees or submodules (`.git` file vs. directory). See `config.md`.
-- `service.rs::index_path` duplicates the git-root-walk logic from `config.rs::find_git_root`. A third caller should prompt a shared utility.
+- `service.rs::index_path` and `service.rs::deps_index_path` both duplicate the git-root-walk logic from `config.rs::find_git_root`. Three independent implementations now exist; a shared utility is overdue.

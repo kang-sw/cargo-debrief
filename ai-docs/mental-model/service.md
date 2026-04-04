@@ -12,8 +12,11 @@
 - `InProcessService` is a **zero-sized type** — no fields. Config is resolved from `project_root` per call.
 - `main.rs` resolves `project_root` from `std::env::current_dir()` and passes it to every service call. Config loading has been removed from `main.rs`.
 - The trait requires all returned futures to be `Send`, enforcing that implementations must be usable in a multi-threaded tokio runtime.
-- **`search` and `overview` auto-index silently.** Both call `ensure_index_fresh` before executing. If the on-disk index is missing, stale (commit changed), or was built with a different model, a full or incremental reindex runs transparently before returning results. The `index` method (exposed as `rebuild-index` CLI) always forces a full reindex regardless of staleness.
-- **Embedding is batched in groups of 64** (`EMBED_BATCH_SIZE` in `service.rs`). A progress line is written to stderr during indexing: `indexing` followed by one `.` per completed batch, then `\ndone. N chunks, M files.` This output is unconditional stderr — it is not gated by log level and cannot be suppressed via `RUST_LOG`.
+- **`search` and `overview` auto-index silently.** Both construct an `Embedder` upfront, then call `ensure_index_fresh(project_root, &embedder)`. If the on-disk index is missing, stale (commit changed), or was built with a different model, a full or incremental reindex runs transparently before returning results. The `index` method (exposed as `rebuild-index` CLI) always forces a full reindex regardless of staleness.
+- **`search` also calls `ensure_deps_index_fresh` silently.** After ensuring the project index is current, `search` calls `ensure_deps_index_fresh(project_root, &embedder)`. The resulting `DepsIndexData` is not yet used in search ranking (Phase 3), but dep reindexing happens transparently if `Cargo.lock` changed.
+- **`index` triggers both project and dep indexing.** `InProcessService::index` runs `run_index` followed by `run_deps_index`. Both receive the same `Embedder` instance constructed once at the top of `index`.
+- **`Embedder` is constructed by callers, not internally in `run_index`.** `run_index` and `ensure_index_fresh` both accept `embedder: &Embedder` as a parameter. The model is resolved from config before calling these helpers.
+- **Embedding is batched in groups of 64** (`EMBED_BATCH_SIZE` in `service.rs`). A progress line is written to stderr during indexing: `indexing` followed by one `.` per completed batch, then `\ndone. N chunks, M files.` Dep indexing prints `indexing deps` + dots + `\ndone. N dep chunks.` Both are unconditional stderr — not gated by `RUST_LOG`.
 - **`index` ignores its `path` parameter.** `InProcessService::index` always indexes the full `project_root` tree via `git ls-files`. The `path` argument is accepted to satisfy the trait but is ignored (`_path`).
 
 ## Trait Signature
@@ -45,7 +48,8 @@ pub trait DebriefService {
 - Call `crate::config::config_paths(project_root)` then `crate::config::load_config(&paths)` to derive config.
 - To write config, call `crate::config::load_layer_single(&target_path)?.unwrap_or_default()`, mutate, then `crate::config::save_config(&target_path, &config)`. See `set_embedding_model` as the reference implementation.
 - No caching at the struct level — config is small and resolution is cheap.
-- To read the index, call `ensure_index_fresh(project_root)` (returns `IndexData`). To write it, call `store::save_index(&index_path(project_root)?, &data)`.
+- To read the project index, construct an `Embedder` from config first, then call `ensure_index_fresh(project_root, &embedder)` (returns `IndexData`). To write it, call `store::save_index(&index_path(project_root)?, &data)`.
+- To read the dep index, call `ensure_deps_index_fresh(project_root, &embedder)` (returns `DepsIndexData`). Staleness is Cargo.lock-hash based, not commit-based.
 
 **Adding Phase 2 DaemonClient:**
 
@@ -59,4 +63,6 @@ pub trait DebriefService {
 - **Omitting `project_root` from a new trait method** — violates the multi-workspace contract; every operation must be workspace-addressed.
 - **Passing `path` to `InProcessService::index` and expecting scoped indexing** — the `path` parameter is ignored; the implementation always indexes `project_root` fully. A scoped path parameter on the trait is a forward-compat placeholder.
 - **Expecting `search` or `overview` to fail fast on a missing index** — they will silently trigger a full reindex (including model download) before returning. This can cause unexpected latency on first call.
+- **Calling `run_index` or `ensure_index_fresh` without constructing an `Embedder` first** — both functions require `embedder: &Embedder` as a parameter. The old pattern of constructing the embedder inside `run_index` was removed in Phase 2; callers are responsible for construction.
+- **Expecting `search` to return dep results** — `ensure_deps_index_fresh` is called in `search` but `_deps_data` is intentionally unused until Phase 3. The dep index is loaded/built but not merged into search ranking yet.
 - **Capturing only stdout when testing service output** — indexing progress (`indexing....done.`) goes to stderr unconditionally. Integration tests or tools that pipe only stdout will miss it; tests that scan stderr for clean output will see it.

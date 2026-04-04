@@ -15,11 +15,12 @@
 
 ## Coupling
 
-- **No integration with `ChunkOrigin` yet (Phase 1).** `DepPackageInfo` exists but is not consumed by `chunker` or `service`. Phase 2 will wire `discover_dependency_packages` into the indexing pipeline and populate `ChunkOrigin::Dependency` on chunks produced from dependency sources.
-- **Caller owns caching.** `discover_dependency_packages` always runs `cargo metadata` on every call. Repeated calls in a single session are expensive. Phase 2 must cache or limit invocation frequency.
+- **Phase 2 wiring lives in `service.rs`, not `deps.rs`.** `discover_dependency_packages` is called by `run_deps_index` in `service.rs`. The `deps` module itself remains a pure discovery module — no indexing logic is added here.
+- **`discover_dependency_packages` is called once per `run_deps_index` invocation** (i.e., whenever `Cargo.lock` hash changes). There is no cross-call caching inside `deps.rs`; `service.rs` avoids repeat calls by gating on `ensure_deps_index_fresh`.
+- **`ChunkOrigin::Dependency` is populated by `service.rs::run_deps_index`**, not by `deps.rs` or `chunker`. The chunker assigns `ChunkOrigin::Project` by default; `run_deps_index` overwrites `chunk.origin` after chunking.
 
 ## Common Mistakes
 
 - **Passing a file path instead of a directory** — `MetadataCommand::current_dir` expects the project root directory, not a `Cargo.toml` path. Passing a file path makes `cargo metadata` fail with a non-obvious error.
-- **Expecting `src_root` to point at source files directly** — `src_root` is the crate's manifest directory. Source files live under `src_root/src/`. Phase 2 code walking dependency source must append `src/`.
-- **Assuming non-empty `root_deps` for every package** — packages that appear in the dependency graph but are not reachable from any workspace direct dependency (edge case with optional features) will have an empty `root_deps`. Filtering by `root_dep` membership will silently exclude them.
+- **Expecting `src_root` to point at source files directly** — `src_root` is the crate's manifest directory. Source files live under `src_root/src/`. `service.rs::collect_dep_rs_files` appends `src/` before walking.
+- **Assuming non-empty `root_deps` for every package** — packages reachable only via optional features may have empty `root_deps`. The embedding annotation omits the `(dependency of: ...)` clause in that case; chunks are still indexed.
