@@ -22,7 +22,7 @@
 
 ## Coupling
 
-- `main.rs` uses `resolve_service(project_root)` which returns `Service::Daemon(DaemonClient)` if a live daemon is detected, or `Service::InProcess(InProcessService)` otherwise. The `Service` enum implements `DebriefService` by delegating to the inner variant.
+- `main.rs` uses `resolve_service(project_root)` which calls `daemon::auto_spawn_and_connect(project_root)` and wraps the result in `Service::new(client)`. `Service` is a **struct** (not an enum) holding `Option<DaemonClient>` and `InProcessService`. Each method tries the daemon first; on any `Err`, it logs `[daemon] error, falling back to in-process: ...` to stderr and retries the same operation on `InProcessService`. Daemon errors never propagate to callers.
 - `IndexResult` and `SearchResult` derive `Serialize`/`Deserialize` — required for IPC transport. Any new field on these types must be serializable or the build fails.
 
 ## Extension Points & Change Recipes
@@ -32,7 +32,7 @@
 1. Add the method to the `DebriefService` trait in `src/service.rs` with `project_root: &Path` as first parameter.
 2. Implement it on `InProcessService`.
 3. Implement it on `DaemonClient` — add variant to `DaemonRequest`/`DaemonResponse` in `src/ipc/protocol.rs`, add arm to `daemon::handle_request`, then call via `self.send(...)` in `DaemonClient`.
-4. Add arm to `Service` enum delegation in `src/service.rs`.
+4. Add a `if let Some(d) = &self.daemon { ... }` arm in the new method on `Service` in `src/service.rs`, following the try-daemon-then-fallback pattern used by the existing methods.
 5. Add dispatch arm in `main.rs`, passing `&project_root`.
 
 **Implementing a method body in InProcessService:**
@@ -46,7 +46,7 @@
 
 ## Common Mistakes
 
-- **Attempting `Box<dyn DebriefService>`** — fails to compile because RPITIT makes the trait non-object-safe. The `Service` enum is the dispatch mechanism.
+- **Attempting `Box<dyn DebriefService>`** — fails to compile because RPITIT makes the trait non-object-safe. The `Service` struct is the dispatch mechanism.
 - **Passing a different `project_root` to `DaemonClient` methods** — `DaemonClient` ignores the `project_root` parameter (`_project_root`). The daemon is bound to the workspace it was started with; requests run against that workspace regardless of the parameter value.
 - **Omitting `project_root` from a new trait method** — violates the multi-workspace contract; every operation must be workspace-addressed.
 - **Passing `path` to `InProcessService::index` and expecting scoped indexing** — the `path` parameter is ignored; the implementation always indexes `project_root` fully. A scoped path parameter on the trait is a forward-compat placeholder.
@@ -54,3 +54,4 @@
 - **Calling `run_index` or `ensure_index_fresh` without constructing an `Embedder` first** — both functions require `embedder: &Embedder` as a parameter. The old pattern of constructing the embedder inside `run_index` was removed in Phase 2; callers are responsible for construction.
 - **Calling `search` without `include_deps: true` and expecting dep results** — dep chunks are only merged into the search pool when `include_deps` is `true`. The CLI default is `include_deps = true` (controlled by the `--no-deps` flag).
 - **Capturing only stdout when testing service output** — indexing progress (`indexing....done.`) goes to stderr unconditionally. Integration tests or tools that pipe only stdout will miss it; tests that scan stderr for clean output will see it.
+- **Expecting daemon errors to propagate** — `Service` silently falls back to `InProcessService` on any daemon error, emitting only an `eprintln!`. A broken daemon causes silent performance degradation (InProcess is heavier than IPC), not a visible error. Daemon-bug investigation must inspect stderr for `[daemon] error` lines.
