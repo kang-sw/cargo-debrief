@@ -6,18 +6,18 @@ features:
     - 🚧 Shared Configuration (`.debrief/`)
     - 🚧 Local Storage (`.git/debrief/`)
     - 🚧 Global Configuration
-  - 🚧 Code Indexing
+  - Code Indexing
     - 🚧 AST-Aware Chunking
     - 🚧 Cross-File Skeleton Assembly
     - 🚧 Dual Text Representation
     - 🚧 Chunk Metadata
-    - 🚧 Git-Based Incremental Re-Indexing
-  - 🚧 Code Search
+    - Git-Based Incremental Re-Indexing
+  - Code Search
     - Vector Similarity Search
     - Metadata Score Boosting
-  - 🚧 Overview
+  - Overview
   - Embedding Model Management
-  - 🚧 Index Persistence
+  - Index Persistence
   - 🚧 Daemon Mode
   - 🚧 MCP Server
   - 🚧 Language Support
@@ -83,17 +83,17 @@ User-level defaults stored in a platform-standard config directory
 >   config paths will not be resolved in those cases (falls back to
 >   global config only).
 
-## 🚧 Code Indexing
+## Code Indexing
 
 Index a codebase for subsequent search. Parses source files with
 tree-sitter into semantically meaningful chunks and generates vector
 embeddings for each chunk.
 
 ```
-cargo debrief rebuild-index [<path>]
+cargo debrief rebuild-index
 ```
 
-- `<path>` defaults to the current directory.
+- Always indexes the full project root (no path argument accepted).
 - On first run, performs a full index of all supported source files.
 - On subsequent runs, performs incremental re-indexing (see below).
 - Index is stored in `.git/debrief/index.bin`.
@@ -224,7 +224,7 @@ When a query exactly matches a chunk's `symbol_name`, that chunk
 receives a score boost — providing the precision of exact symbol
 lookup without a separate command or keyword index.
 
-### 🚧 Git-Based Incremental Re-Indexing
+### Git-Based Incremental Re-Indexing
 
 On re-index, only files changed since the last indexed commit are
 re-parsed and re-embedded.
@@ -296,7 +296,7 @@ a separate symbol lookup command or BM25 keyword index.
 > - BM25 keyword search may be added later if metadata boosting
 >   proves insufficient for exact-match queries.
 
-## 🚧 Overview
+## Overview
 
 Retrieve a file-level overview showing only declarations and signatures.
 
@@ -347,7 +347,7 @@ cargo debrief set-embedding-model [--global] <model-name>
 > - Only models listed in the built-in registry are accepted.
 >   Arbitrary HuggingFace model names are not supported.
 
-## 🚧 Index Persistence
+## Index Persistence
 
 The search index is serialized to disk for fast reload across sessions.
 Stored in `.git/debrief/` (local, not committed).
