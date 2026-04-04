@@ -7,6 +7,7 @@ related:
 plans:
   phase-1: null
 started: 2026-04-04
+completed: 2026-04-04
 ---
 
 # DebriefService Trait — Multi-Workspace Support
@@ -102,3 +103,19 @@ existing tests continue to pass.
   internally, keyed by project root.
 - MCP server can use the same trait — each MCP request includes the
   workspace context.
+
+### Result
+
+Implemented 2026-04-04. All Phase 1 success criteria met:
+
+- `project_root: &Path` added as first parameter to all four `DebriefService`
+  methods (`index`, `search`, `get_skeleton`, `set_embedding_model`).
+- `InProcessService` is now a zero-sized type (`pub struct InProcessService;`).
+  The `Config` field and construction-time binding are removed entirely.
+- `main.rs` simplified: resolves `project_root` from `current_dir()`,
+  constructs `InProcessService::new()`, passes root to every service call.
+  Config loading removed from `main.rs`.
+- New test `in_process_service_different_roots_are_independent` added:
+  verifies roots propagate independently (confirmed via stub error messages).
+- All 28 tests pass. Mental model (`ai-docs/mental-model/service.md`) and
+  project index (`ai-docs/_index.md`) updated to reflect new trait shape.

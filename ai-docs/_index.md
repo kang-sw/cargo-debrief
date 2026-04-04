@@ -10,7 +10,7 @@ src/
   main.rs       — CLI entrypoint (clap): index, search, get-skeleton, set-embedding-model
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
-  service.rs    — DebriefService trait (async RPITIT) + InProcessService
+  service.rs    — DebriefService trait (async RPITIT, project_root per method) + InProcessService (zero-sized)
   chunk.rs      — Chunk data model (Chunk, ChunkMetadata, ChunkKind, ChunkType, Visibility)
   chunker/      — Chunker trait + RustChunker (tree-sitter AST-aware chunking)
     mod.rs      — Chunker trait definition
@@ -81,3 +81,4 @@ See `ai-docs/mental-model/` for operational knowledge:
 - Initial project setup. Research ticket captures architecture discussion.
 - Phase 1A scaffold implemented: CLI, config, service trait.
 - Phase 1B core indexing pipeline implemented: chunk model, tree-sitter Rust chunking, git tracking, index serialization.
+- Service trait refactored: `project_root: &Path` added to all `DebriefService` methods; `InProcessService` is now zero-sized; config loading removed from `main.rs`.
