@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
 
-const INDEX_VERSION: u32 = 3;
+const INDEX_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub struct IndexData {
@@ -55,7 +55,7 @@ pub fn load_index(path: &Path) -> Result<Option<IndexData>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{Chunk, ChunkKind, ChunkMetadata, ChunkType, Visibility};
+    use crate::chunk::{Chunk, ChunkKind, ChunkMetadata, ChunkOrigin, ChunkType, Visibility};
 
     fn sample_chunk(name: &str) -> Chunk {
         Chunk {
@@ -72,6 +72,7 @@ mod tests {
                 signature: Some(format!("fn {name}()")),
             },
             embedding: Some(vec![0.1, 0.2, 0.3]),
+            origin: ChunkOrigin::Project,
         }
     }
 

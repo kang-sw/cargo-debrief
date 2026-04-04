@@ -167,7 +167,7 @@ fn apply_symbol_boost(raw_score: f64, query_text: Option<&str>, symbol_name: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{ChunkKind, ChunkMetadata, ChunkType, Visibility};
+    use crate::chunk::{ChunkKind, ChunkMetadata, ChunkOrigin, ChunkType, Visibility};
 
     fn make_chunk(symbol_name: &str, file_path: &str, embedding: Option<Vec<f32>>) -> Chunk {
         Chunk {
@@ -184,6 +184,7 @@ mod tests {
                 signature: None,
             },
             embedding,
+            origin: ChunkOrigin::Project,
         }
     }
 
