@@ -16,10 +16,13 @@ features:
     - Vector Similarity Search
     - Metadata Score Boosting
   - Overview
-  - Configuration (`config` subcommand)
+  - Configuration
     - Embedding Model Management
     - 🚧 GPU Acceleration
   - 🚧 LLM Chunk Summarization
+    - Configuration
+    - Behavior
+    - Scale
   - Index Persistence
   - 🚧 Daemon Mode
   - 🚧 MCP Server
@@ -275,8 +278,10 @@ cargo debrief search <query> [--top-k N]
 - `--top-k` defaults to 10.
 - Returns ranked code chunks with file path, line range, relevance
   score, and chunk metadata.
-- Each result returns the chunk's `display_text`. Embeddings are
-  computed from `embedding_text` (which includes additional context).
+- Each result is prefixed with a `// in crate::module` context comment
+  identifying the containing module, followed by the chunk's `display_text`.
+  Embeddings are computed from `embedding_text` (which includes additional
+  context).
 - Automatically checks index freshness and re-indexes if needed before
   searching (implicit auto-indexing).
 
@@ -328,6 +333,8 @@ cargo debrief overview <file>
 
 - Shows struct/enum/trait definitions, function signatures, impl blocks —
   but not function bodies.
+- Output is ordered by visibility: `pub` items first, then `pub(crate)`,
+  then private.
 - Useful for understanding a file's API surface without reading the
   full implementation.
 - Automatically checks index freshness and re-indexes if needed before
