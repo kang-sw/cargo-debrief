@@ -24,7 +24,7 @@ features:
     - Behavior
     - Scale
   - Index Persistence
-  - 🚧 Daemon Mode
+  - Daemon Mode
   - 🚧 Language Support
   - Dependency Indexing
     - Dependency Search Integration
@@ -484,15 +484,12 @@ Stored in `.git/debrief/` (local, not committed).
 > - Index size scales with codebase: ~60MB for ~20K chunks at 768
 >   dimensions.
 
-## 🚧 Daemon Mode
+## Daemon Mode
 
 Per-workspace background process that keeps the ONNX model session and
 HNSW index loaded in memory, eliminating ~2-4 seconds of startup
 overhead on repeated CLI calls. In-process mode is the fallback when
 the daemon is unavailable.
-
-Phase 2A+2B (daemon lifecycle and IPC transport) is implemented. Phase 2C
-(automatic transparent spawn on first CLI use) is not yet implemented.
 
 - **Per-workspace.** One daemon per project root (not system-wide).
 - **~3 minute idle expiry.** Short lifespan — purpose is eliminating
@@ -503,10 +500,12 @@ Phase 2A+2B (daemon lifecycle and IPC transport) is implemented. Phase 2C
   Framing: 4-byte little-endian length prefix + JSON payload.
 - **Discovery.** PID file at `.git/debrief/daemon/daemon.pid`
   (workspace-local). Advisory file lock prevents concurrent start races.
-- **Fallback.** CLI tries to connect to a running daemon on startup. If
-  the daemon is not running, falls back to in-process service silently.
-  Auto-spawn (Phase 2C) is not yet implemented — the daemon must be
-  started manually.
+- **Auto-spawn.** The first CLI invocation transparently spawns the daemon
+  if one is not already running. A progress indicator
+  (`spawning daemon.......done.`) is printed to stderr during readiness
+  polling.
+- **Fallback.** Any daemon error silently falls back to in-process service.
+  Stale PID files (dead processes) are automatically cleaned up.
 - In debug builds, CLI compares binary mtime with the running daemon
   (`daemon.exe_mtime` marker) and force-kills stale daemons on mismatch.
 
@@ -523,8 +522,6 @@ cargo debrief daemon stop
   if IPC fails.
 
 > [!note] Constraints
-> - Auto-spawn (Phase 2C) is not yet implemented. The daemon must be
->   started externally; CLI falls back to in-process if daemon is absent.
 > - IPC uses platform FIFOs (Unix) or atomic-rename files (Windows).
 >   Sandboxed environments that restrict named pipes may prevent daemon
 >   connectivity; in-process fallback still works in those cases.
