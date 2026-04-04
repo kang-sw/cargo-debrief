@@ -128,3 +128,4 @@ Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunkin
 - P1 micro-chunk merging implemented (≤5-line method inlining, module overview chunks). INDEX_VERSION 3.
 - Phase 3 UX: overview ordering by visibility (pub→pub(crate)→pub(super)→private), search results prefixed with `// in crate::module` context line.
 - Dependency Chunking Phase 1: ChunkOrigin enum on Chunk (Project | Dependency), new deps.rs module (cargo metadata + BFS root-dep discovery), INDEX_VERSION 4. GPU bug split to separate ticket.
+- Dependency Chunking Phase 2: DepsIndexData in store.rs (DEPS_INDEX_VERSION 1, Cargo.lock hash staleness). Embedder refactored to param-passing. run_deps_index pipeline: walk dep src/, pub-filter, [dependency] tag annotation, 64-chunk batch embedding, deps-index.bin. Wired into index + search (data unused until Phase 3).
