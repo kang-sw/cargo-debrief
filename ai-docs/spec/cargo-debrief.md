@@ -13,10 +13,10 @@ features:
     - 🚧 Chunk Metadata
     - 🚧 Git-Based Incremental Re-Indexing
   - 🚧 Code Search
-    - 🚧 Vector Similarity Search
-    - 🚧 Metadata Score Boosting
+    - Vector Similarity Search
+    - Metadata Score Boosting
   - 🚧 File Skeleton
-  - 🚧 Embedding Model Management
+  - Embedding Model Management
   - 🚧 Index Persistence
   - 🚧 Daemon Mode
   - 🚧 MCP Server
@@ -238,7 +238,7 @@ re-parsed and re-embedded.
 > - Tracks the working tree's HEAD, not uncommitted changes (TBD whether
 >   to include staged/unstaged changes).
 
-## 🚧 Code Search
+## Code Search
 
 Vector similarity search with metadata-based score boosting.
 
@@ -246,13 +246,13 @@ Vector similarity search with metadata-based score boosting.
 cargo debrief search <query> [--top-k N]
 ```
 
-- `--top-k` defaults to a reasonable value (e.g., 10).
+- `--top-k` defaults to 10.
 - Returns ranked code chunks with file path, line range, relevance
   score, and chunk metadata.
 - Each result returns the chunk's `display_text`. Embeddings are
   computed from `embedding_text` (which includes additional context).
 
-### 🚧 Vector Similarity Search
+### Vector Similarity Search
 
 Cosine similarity between query embedding and chunk embeddings.
 Handles both natural-language and identifier-based queries:
@@ -260,22 +260,30 @@ Handles both natural-language and identifier-based queries:
 - `"memory deallocation logic"` — matches semantically
 - `"ConnectionPool"` — embedding model picks up identifier tokens
 
-Uses hnsw_rs for approximate nearest neighbor search.
+Uses hnsw_rs for approximate nearest neighbor search with the
+following parameters: 16 max connections, 16 max layers,
+ef_construction=200, ef_search=50.
 
-### 🚧 Metadata Score Boosting
+The search over-fetches `max(top_k*2, top_k+20)` raw candidates from
+HNSW, applies metadata score boosting to all of them, then truncates
+to `top_k` — ensuring that a boosted chunk just outside the raw top_k
+window is not lost.
 
-Vector similarity scores are adjusted based on chunk metadata matches:
+### Metadata Score Boosting
 
-- **Exact symbol name match**: query text matches `symbol_name` field
-  → significant score boost. Provides exact-lookup precision within
-  the search command.
-- **Kind/visibility filtering**: optional flags to narrow results
-  (e.g., only public functions, only structs).
+Vector similarity scores are adjusted based on chunk metadata matches
+using additive boosts (scores may exceed 1.0):
 
-This replaces the need for a separate BM25 keyword index or a
-dedicated symbol lookup command.
+- **Exact symbol name match** (case-insensitive): `+0.3`
+- **Partial symbol name match** (substring in either direction,
+  case-insensitive): `+0.1`
+
+This provides exact-lookup precision within the search command without
+a separate symbol lookup command or BM25 keyword index.
 
 > [!note] Constraints
+> - Kind/visibility filtering flags (`--kind`, `--visibility`) are
+>   scaffolded in the spec but not yet implemented.
 > - Designed for project-scale data (~20K chunks, ~60MB vectors).
 >   Suitable for most single-project codebases. Not tested at
 >   monorepo scale (>100K files).
@@ -295,7 +303,7 @@ cargo debrief get-skeleton <file>
 - Useful for understanding a file's API surface without reading the
   full implementation.
 
-## 🚧 Embedding Model Management
+## Embedding Model Management
 
 Manage the embedding model used for vector search.
 
@@ -303,20 +311,33 @@ Manage the embedding model used for vector search.
 cargo debrief set-embedding-model [--global] <model-name>
 ```
 
-- On first use, the default model is automatically downloaded.
+- On first use, the default model is automatically downloaded with a
+  streaming progress bar. Partial downloads are written to a `.tmp`
+  file and renamed atomically on completion.
 - `--global` sets the model in global config (`~/.config/debrief/`).
 - Without `--global`, sets the model in `.debrief/config.toml`
   (shared with team).
-- Model binary files are cached in global data directory
-  (e.g., `~/.local/share/debrief/models/`). Never stored per-project.
+- Model binary files are cached at `{data_dir}/debrief/models/{model_name}/`
+  where `data_dir` is the platform-standard data directory
+  (`dirs::data_dir()`, e.g., `~/.local/share` on Linux,
+  `~/Library/Application Support` on macOS). Never stored per-project.
 - Active model reference recorded in `.git/debrief/local-config.toml`.
 - Resolution order: local → project → global → default.
+- `set-embedding-model` validates the name against the known model
+  registry; unknown names are rejected with an error.
+
+**Supported models:**
+
+| Name | Dim | Max tokens | HuggingFace repo |
+|------|-----|-----------|-----------------|
+| `nomic-embed-text-v1.5` (default) | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` |
+| `bge-large-en-v1.5` | 1024 | 512 | `BAAI/bge-large-en-v1.5` |
 
 > [!note] Constraints
 > - Changing the model invalidates the existing index — a full re-index
 >   is required after switching models.
-> - Default model selection is TBD (candidates: nomic-embed-code 137M,
->   bge-large-en-v1.5 335M).
+> - Only models listed in the built-in registry are accepted.
+>   Arbitrary HuggingFace model names are not supported.
 
 ## 🚧 Index Persistence
 

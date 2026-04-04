@@ -17,8 +17,8 @@ src/
     rust.rs     — RustChunker: two-pass AST walk, impl aggregation, dual text generation
   git.rs        — Git file tracking (head_commit, changed_files via Command shellout)
   store.rs      — Index serialization (IndexData, bincode + versioned header)
-  embedder.rs   — (planned) ONNX Runtime embedding inference + model management
-  search.rs     — (planned) vector search + metadata score boosting
+  embedder.rs   — ONNX Runtime embedding: ModelRegistry, Embedder (load, embed_batch, mean pooling + L2 norm)
+  search.rs     — Vector search: SearchIndex (hnsw_rs ANN + symbol-name metadata boosting)
   daemon.rs     — (Phase 2) daemon mode via CLI subcommand
 ```
 
@@ -75,6 +75,8 @@ See `ai-docs/mental-model/` for operational knowledge:
 - `chunker.md` — two-pass design, impl aggregation, orphan impl handling
 - `store.md` — bincode serialization, version mismatch semantics
 - `git.md` — Command shellout, changed_files contract
+- `embedder.md` — ModelRegistry, Embedder, ONNX inference, model download
+- `search.md` — SearchIndex, hnsw_rs ANN, metadata boosting
 
 ## Session Notes
 
@@ -82,3 +84,4 @@ See `ai-docs/mental-model/` for operational knowledge:
 - Phase 1A scaffold implemented: CLI, config, service trait.
 - Phase 1B core indexing pipeline implemented: chunk model, tree-sitter Rust chunking, git tracking, index serialization.
 - Service trait refactored: `project_root: &Path` added to all `DebriefService` methods; `InProcessService` is now zero-sized; config loading removed from `main.rs`.
+- Phase 1C search pipeline implemented: embedder.rs (ONNX inference via ort, model registry with nomic-embed-text-v1.5 + bge-large-en-v1.5, streaming download, mean pooling + L2 norm), search.rs (hnsw_rs ANN, metadata symbol-name boosting), config save_config, set_embedding_model wired.

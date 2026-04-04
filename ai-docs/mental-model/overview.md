@@ -9,12 +9,14 @@
 
 | Module | File(s) | Role |
 |---|---|---|
-| `config` | `src/config.rs` | Path resolution, file loading, layer merge |
-| `service` | `src/service.rs` | `DebriefService` trait + `InProcessService` stub |
+| `config` | `src/config.rs` | Path resolution, file loading, layer merge, layer write |
+| `service` | `src/service.rs` | `DebriefService` trait + `InProcessService` |
 | `chunk` | `src/chunk.rs` | `Chunk` data model (pure data, no logic) |
 | `chunker` | `src/chunker/mod.rs`, `src/chunker/rust.rs` | `Chunker` trait + `RustChunker` (tree-sitter AST walk) |
 | `git` | `src/git.rs` | Git file tracking via `Command` shellout |
 | `store` | `src/store.rs` | Versioned index serialization (bincode) |
+| `embedder` | `src/embedder.rs` | ONNX embedding pipeline: model registry, download, inference |
+| `search` | `src/search.rs` | Vector ANN search (hnsw_rs) with metadata score boosting |
 
 ## Module Contracts
 
@@ -29,5 +31,5 @@
 
 ## Technical Debt
 
-- All `DebriefService` methods are stubs that return `anyhow::bail!`. The CLI currently errors on every command.
+- `index`, `search`, and `get_skeleton` on `InProcessService` are still stubs that return `anyhow::bail!`. Only `set_embedding_model` is fully implemented.
 - `find_git_root` does not support git worktrees or submodules (`.git` file vs. directory). See `config.md`.
