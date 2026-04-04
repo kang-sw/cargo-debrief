@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::{
-    chunk::{Chunk, ChunkType, Visibility},
+    chunk::{Chunk, ChunkOrigin, ChunkType, Visibility},
     chunker::{Chunker, RustChunker},
     config::{config_paths, load_config, save_config},
+    deps,
     embedder::{Embedder, ModelRegistry},
     git,
     search::SearchIndex,
-    store::{self, IndexData},
+    store::{self, DepsIndexData, IndexData},
 };
 
 /// Result of an indexing operation.
@@ -27,6 +28,7 @@ pub struct SearchResult {
     pub score: f64,
     pub display_text: String,
     pub module_path: String,
+    pub origin: ChunkOrigin,
 }
 
 /// Service boundary between CLI and core logic.
@@ -52,12 +54,19 @@ pub trait DebriefService {
         project_root: &Path,
         query: &str,
         top_k: usize,
+        include_deps: bool,
     ) -> impl Future<Output = Result<Vec<SearchResult>>> + Send;
 
     fn overview(
         &self,
         project_root: &Path,
         file: &Path,
+    ) -> impl Future<Output = Result<String>> + Send;
+
+    fn dep_overview(
+        &self,
+        project_root: &Path,
+        crate_name: &str,
     ) -> impl Future<Output = Result<String>> + Send;
 
     fn set_embedding_model(
@@ -123,7 +132,7 @@ async fn make_embedder(model_name: &str) -> Result<Embedder> {
 /// - Already fresh → return stored index unchanged.
 ///
 /// Called silently before `search` and `overview`; no user-visible output.
-async fn ensure_index_fresh(project_root: &Path) -> Result<IndexData> {
+async fn ensure_index_fresh(project_root: &Path, embedder: &Embedder) -> Result<IndexData> {
     let paths = config_paths(project_root);
     let config = load_config(&paths)?;
     let model_name = config
@@ -145,7 +154,7 @@ async fn ensure_index_fresh(project_root: &Path) -> Result<IndexData> {
         Some(data) => return Ok(data),
     };
 
-    let (data, _) = run_index(project_root, prior_commit.as_deref(), base_index).await?;
+    let (data, _) = run_index(project_root, prior_commit.as_deref(), base_index, embedder).await?;
     Ok(data)
 }
 
@@ -157,6 +166,7 @@ async fn run_index(
     project_root: &Path,
     prior_commit: Option<&str>,
     existing_index: Option<IndexData>,
+    embedder: &Embedder,
 ) -> Result<(IndexData, IndexResult)> {
     let paths = config_paths(project_root);
     let config = load_config(&paths)?;
@@ -164,8 +174,6 @@ async fn run_index(
         .embedding_model
         .as_deref()
         .unwrap_or(ModelRegistry::DEFAULT_MODEL);
-
-    let embedder = make_embedder(model_name).await?;
 
     let changes = git::changed_files(project_root, prior_commit)?;
 
@@ -265,13 +273,223 @@ async fn run_index(
 }
 
 // ---------------------------------------------------------------------------
+// Dependency indexing helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the dependency index path: `.git/debrief/deps-index.bin`.
+fn deps_index_path(project_root: &Path) -> Result<PathBuf> {
+    let mut current = project_root;
+    loop {
+        let candidate = current.join(".git");
+        if candidate.is_dir() {
+            return Ok(candidate.join("debrief").join("deps-index.bin"));
+        }
+        current = current
+            .parent()
+            .context("not inside a git repository; cannot locate deps index path")?;
+    }
+}
+
+/// Hash the contents of `Cargo.lock` using `DefaultHasher`.
+///
+/// Output is deterministic within a process. A hash collision or Rust version
+/// change triggers a harmless full dep reindex — acceptable without adding a
+/// `sha2`/`blake3` dependency.
+fn cargo_lock_content_hash(project_root: &Path) -> Result<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let bytes = std::fs::read(project_root.join("Cargo.lock")).context("Cargo.lock not found")?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+/// Recursively collect `.rs` files under `src_dir`.
+///
+/// Returns an empty vec (no error) when `src_dir` does not exist — some
+/// crates in the registry cache have no `src/` directory.
+fn collect_dep_rs_files(src_dir: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    collect_rs_recursive(src_dir, &mut result);
+    result
+}
+
+fn collect_rs_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_recursive(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Build the annotated embedding text for a dependency chunk.
+///
+/// Prepends `[dependency] {crate_name} (dependency of: {root_deps, ...})`
+/// or `[dependency] {crate_name}` when `root_deps` is empty.
+fn build_dep_embedding_text(
+    crate_name: &str,
+    root_deps: &[String],
+    original_embedding_text: &str,
+) -> String {
+    let header = if root_deps.is_empty() {
+        format!("[dependency] {crate_name}")
+    } else {
+        format!(
+            "[dependency] {crate_name} (dependency of: {})",
+            root_deps.join(", ")
+        )
+    };
+    format!("{header}\n{original_embedding_text}")
+}
+
+/// Index all non-workspace dependency packages and write `deps-index.bin`.
+///
+/// Walks `dep.src_root/src/` for each package, chunks `.rs` files with
+/// `RustChunker`, retains only `pub` items, annotates embedding text, and
+/// embeds in batches.
+async fn run_deps_index(project_root: &Path, embedder: &Embedder) -> Result<DepsIndexData> {
+    let config = load_config(&config_paths(project_root))?;
+    let mut packages = deps::discover_dependency_packages(project_root)?;
+    let lock_hash = cargo_lock_content_hash(project_root).ok();
+
+    // Apply exclude list from config before chunking.
+    let exclude: std::collections::HashSet<&str> = config
+        .dependencies
+        .as_ref()
+        .and_then(|d| d.exclude.as_ref())
+        .map(|v| v.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    if !exclude.is_empty() {
+        packages.retain(|p| !exclude.contains(p.crate_name.as_str()));
+    }
+
+    let chunker = RustChunker;
+    let mut all_chunks: Vec<Chunk> = Vec::new();
+    let mut all_embedding_texts: Vec<String> = Vec::new();
+
+    for package in &packages {
+        let src_dir = package.src_root.join("src");
+        for rs_file in collect_dep_rs_files(&src_dir) {
+            let relative = rs_file
+                .strip_prefix(&package.src_root)
+                .unwrap_or(&rs_file)
+                .to_path_buf();
+            let source = match std::fs::read_to_string(&rs_file) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let raw_chunks = match chunker.chunk(&relative, &source) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for mut chunk in raw_chunks {
+                if chunk.metadata.visibility != Visibility::Pub {
+                    continue;
+                }
+                let annotated = build_dep_embedding_text(
+                    &package.crate_name,
+                    &package.root_deps,
+                    &chunk.embedding_text,
+                );
+                chunk.embedding_text = annotated.clone();
+                chunk.origin = ChunkOrigin::Dependency {
+                    crate_name: package.crate_name.clone(),
+                    crate_version: package.crate_version.clone(),
+                    root_deps: package.root_deps.clone(),
+                };
+                all_embedding_texts.push(annotated);
+                all_chunks.push(chunk);
+            }
+        }
+    }
+
+    // Embed in batches.
+    const EMBED_BATCH_SIZE: usize = 64;
+    let embeddings: Vec<Vec<f32>> = if all_embedding_texts.is_empty() {
+        vec![]
+    } else {
+        use std::io::Write;
+        eprint!("indexing deps");
+        let _ = std::io::stderr().flush();
+
+        let mut accumulated = Vec::with_capacity(all_embedding_texts.len());
+        for batch in all_embedding_texts.chunks(EMBED_BATCH_SIZE) {
+            let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+            accumulated.extend(embedder.embed_batch(&text_refs)?);
+            eprint!(".");
+            let _ = std::io::stderr().flush();
+        }
+        eprintln!("\ndone. {} dep chunks.", all_embedding_texts.len());
+        accumulated
+    };
+
+    assert_eq!(
+        embeddings.len(),
+        all_chunks.len(),
+        "embed_batch returned {} vectors for {} dep chunks",
+        embeddings.len(),
+        all_chunks.len()
+    );
+
+    for (chunk, emb) in all_chunks.iter_mut().zip(embeddings) {
+        chunk.embedding = Some(emb);
+    }
+
+    let mut data = DepsIndexData::new();
+    data.cargo_lock_hash = lock_hash;
+    data.chunks = all_chunks;
+
+    let path = deps_index_path(project_root)?;
+    store::save_deps_index(&path, &data)?;
+    Ok(data)
+}
+
+/// Ensure the dep index is fresh relative to `Cargo.lock`.
+///
+/// If the stored hash matches the current `Cargo.lock` hash → return cached data.
+/// Otherwise → run a full dep reindex.
+async fn ensure_deps_index_fresh(
+    project_root: &Path,
+    embedder: &Embedder,
+) -> Result<DepsIndexData> {
+    let current_hash = cargo_lock_content_hash(project_root).ok();
+    let path = deps_index_path(project_root)?;
+
+    if let Some(data) = store::load_deps_index(&path)?
+        && data.cargo_lock_hash == current_hash
+        && current_hash.is_some()
+    {
+        return Ok(data);
+    }
+
+    run_deps_index(project_root, embedder).await
+}
+
+// ---------------------------------------------------------------------------
 // DebriefService implementation
 // ---------------------------------------------------------------------------
 
 impl DebriefService for InProcessService {
     async fn index(&self, project_root: &Path, _path: &Path) -> Result<IndexResult> {
+        let config = load_config(&config_paths(project_root))?;
+        let model_name = config
+            .embedding_model
+            .as_deref()
+            .unwrap_or(ModelRegistry::DEFAULT_MODEL);
+        let embedder = make_embedder(model_name).await?;
+
         // Full reindex: no prior commit, no existing index.
-        let (_data, result) = run_index(project_root, None, None).await?;
+        let (_data, result) = run_index(project_root, None, None, &embedder).await?;
+        run_deps_index(project_root, &embedder).await?;
         Ok(result)
     }
 
@@ -280,8 +498,8 @@ impl DebriefService for InProcessService {
         project_root: &Path,
         query: &str,
         top_k: usize,
+        include_deps: bool,
     ) -> Result<Vec<SearchResult>> {
-        let index_data = ensure_index_fresh(project_root).await?;
         let config = load_config(&config_paths(project_root))?;
         let model_name = config
             .embedding_model
@@ -289,18 +507,33 @@ impl DebriefService for InProcessService {
             .unwrap_or(ModelRegistry::DEFAULT_MODEL);
         let embedder = make_embedder(model_name).await?;
 
-        let flat_chunks: Vec<(PathBuf, Chunk)> = index_data
+        let index_data = ensure_index_fresh(project_root, &embedder).await?;
+
+        let mut flat_chunks: Vec<(PathBuf, Chunk)> = index_data
             .chunks
             .into_iter()
             .flat_map(|(path, chunks)| chunks.into_iter().map(move |c| (path.clone(), c)))
             .collect();
+
+        if include_deps {
+            let deps_data = ensure_deps_index_fresh(project_root, &embedder).await?;
+            for chunk in deps_data.chunks {
+                flat_chunks.push((PathBuf::from(&chunk.metadata.file_path), chunk));
+            }
+        }
 
         let search_index = SearchIndex::build(flat_chunks)?;
         search_index.search(query, &embedder, top_k)
     }
 
     async fn overview(&self, project_root: &Path, file: &Path) -> Result<String> {
-        let index_data = ensure_index_fresh(project_root).await?;
+        let config = load_config(&config_paths(project_root))?;
+        let model_name = config
+            .embedding_model
+            .as_deref()
+            .unwrap_or(ModelRegistry::DEFAULT_MODEL);
+        let embedder = make_embedder(model_name).await?;
+        let index_data = ensure_index_fresh(project_root, &embedder).await?;
 
         // Normalize `file` to repo-relative form for index key lookup.
         let file_key = if file.is_absolute() {
@@ -340,6 +573,38 @@ impl DebriefService for InProcessService {
             anyhow::bail!("no overview chunks found for {}", file.display());
         }
         Ok(overview_text)
+    }
+
+    async fn dep_overview(&self, project_root: &Path, crate_name: &str) -> Result<String> {
+        let dep_index_path = deps_index_path(project_root)?;
+        let data = store::load_deps_index(&dep_index_path)?
+            .ok_or_else(|| anyhow::anyhow!("no dependency index; run `rebuild-index` first"))?;
+
+        let mut overview_chunks: Vec<&Chunk> = data
+            .chunks
+            .iter()
+            .filter(|c| {
+                matches!(&c.origin, ChunkOrigin::Dependency { crate_name: cn, .. } if cn == crate_name)
+            })
+            .filter(|c| c.metadata.chunk_type == ChunkType::Overview)
+            .collect();
+
+        if overview_chunks.is_empty() {
+            anyhow::bail!("no overview chunks found for dependency {crate_name:?}");
+        }
+
+        overview_chunks.sort_by_key(|c| match c.metadata.visibility {
+            Visibility::Pub => 0,
+            Visibility::PubCrate => 1,
+            Visibility::PubSuper => 2,
+            Visibility::Private => 3,
+        });
+
+        Ok(overview_chunks
+            .iter()
+            .map(|c| c.display_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"))
     }
 
     async fn set_embedding_model(
@@ -396,6 +661,108 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_cargo_lock_content_hash_is_deterministic() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let h1 = cargo_lock_content_hash(manifest_dir).expect("hash failed");
+        let h2 = cargo_lock_content_hash(manifest_dir).expect("hash failed");
+        assert_eq!(h1, h2, "hash should be deterministic");
+        assert_eq!(h1.len(), 16, "hash should be 16 hex characters");
+        assert!(
+            h1.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash should be hex"
+        );
+    }
+
+    #[test]
+    fn test_collect_dep_rs_files_on_self_src() {
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let files = collect_dep_rs_files(&src_dir);
+        assert!(!files.is_empty(), "expected .rs files in src/");
+        for f in &files {
+            assert_eq!(
+                f.extension().and_then(|e| e.to_str()),
+                Some("rs"),
+                "expected .rs extension, got: {:?}",
+                f
+            );
+        }
+    }
+
+    #[test]
+    fn test_collect_dep_rs_files_missing_dir() {
+        let missing = Path::new("/nonexistent/path/that/does/not/exist");
+        let files = collect_dep_rs_files(missing);
+        assert!(files.is_empty(), "missing dir should return empty vec");
+    }
+
+    #[test]
+    fn test_build_dep_embedding_text_with_root_deps() {
+        let result = build_dep_embedding_text("serde", &["serde".to_string()], "original text");
+        assert!(
+            result.starts_with("[dependency] serde (dependency of: serde)"),
+            "unexpected: {result}"
+        );
+        assert!(result.contains("original text"));
+    }
+
+    #[test]
+    fn test_build_dep_embedding_text_empty_root_deps() {
+        let result = build_dep_embedding_text("serde", &[], "original text");
+        assert!(
+            result.starts_with("[dependency] serde"),
+            "unexpected: {result}"
+        );
+        assert!(
+            !result.contains("(dependency of:"),
+            "should not contain dependency of clause"
+        );
+        assert!(result.contains("original text"));
+    }
+
+    /// Requires the ONNX model to be cached (~130 MB download on first run).
+    #[tokio::test]
+    #[ignore]
+    async fn test_run_deps_index_on_self() -> anyhow::Result<()> {
+        use crate::chunk::ChunkOrigin;
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let model_name = ModelRegistry::DEFAULT_MODEL;
+        let cache_dir = dirs::data_dir()
+            .expect("no data dir")
+            .join("debrief")
+            .join("models");
+        let embedder = Embedder::load(model_name, &cache_dir).await?;
+
+        let data = run_deps_index(manifest_dir, &embedder).await?;
+
+        assert!(!data.chunks.is_empty(), "expected dep chunks");
+
+        let dep_chunk = data
+            .chunks
+            .iter()
+            .find(|c| matches!(&c.origin, ChunkOrigin::Dependency { .. }));
+        assert!(
+            dep_chunk.is_some(),
+            "expected at least one Dependency origin"
+        );
+
+        for chunk in &data.chunks {
+            assert!(chunk.embedding.is_some(), "all chunks should be embedded");
+            assert_eq!(
+                chunk.metadata.visibility,
+                Visibility::Pub,
+                "only pub chunks should be included"
+            );
+            assert!(
+                chunk.embedding_text.starts_with("[dependency]"),
+                "embedding_text should start with [dependency]"
+            );
+        }
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn set_embedding_model_project_scope() -> anyhow::Result<()> {
         use std::process::Command;
@@ -429,5 +796,26 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_dep_overview_empty_index_returns_error() {
+        use std::process::Command;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let service = InProcessService::new();
+        let err = service.dep_overview(dir.path(), "serde").await.unwrap_err();
+        assert!(
+            err.to_string().contains("no dependency index")
+                || err.to_string().contains("no overview chunks"),
+            "expected dep index missing error, got: {err}"
+        );
     }
 }

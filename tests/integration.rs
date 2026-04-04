@@ -294,6 +294,7 @@ fn config_multi_layer_project_overrides_global() {
         &global_path,
         &Config {
             embedding_model: Some("model-a".into()),
+            ..Default::default()
         },
     )
     .expect("save global config");
@@ -302,6 +303,7 @@ fn config_multi_layer_project_overrides_global() {
         &project_path,
         &Config {
             embedding_model: Some("model-b".into()),
+            ..Default::default()
         },
     )
     .expect("save project config");
@@ -331,6 +333,7 @@ fn config_multi_layer_global_preserved_when_project_absent() {
         &global_path,
         &Config {
             embedding_model: Some("model-a".into()),
+            ..Default::default()
         },
     )
     .expect("save global config");
@@ -340,6 +343,7 @@ fn config_multi_layer_global_preserved_when_project_absent() {
         &project_path,
         &Config {
             embedding_model: None,
+            ..Default::default()
         },
     )
     .expect("save project config (no embedding_model)");

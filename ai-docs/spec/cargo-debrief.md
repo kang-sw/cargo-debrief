@@ -27,7 +27,10 @@ features:
   - 🚧 Daemon Mode
   - 🚧 MCP Server
   - 🚧 Language Support
-  - 🚧 Dependency Indexing
+  - Dependency Indexing
+    - Dependency Search Integration
+    - Dependency Overview
+    - Dependency Exclude Configuration
     - 🚧 Language-Specific Dependency Detection
 ---
 
@@ -103,7 +106,8 @@ cargo debrief rebuild-index
 - Always indexes the full project root (no path argument accepted).
 - On first run, performs a full index of all supported source files.
 - On subsequent runs, performs incremental re-indexing (see below).
-- Index is stored in `.git/debrief/index.bin`.
+- Project index stored in `.git/debrief/index.bin`; dependency index
+  stored in `.git/debrief/deps-index.bin`. Both are rebuilt by this command.
 - `rebuild-index` is the explicit manual command. `search` and `overview`
   automatically check index freshness and re-index before executing
   (implicit auto-indexing) — `rebuild-index` is reserved for forced
@@ -272,12 +276,15 @@ re-parsed and re-embedded.
 Vector similarity search with metadata-based score boosting.
 
 ```
-cargo debrief search <query> [--top-k N]
+cargo debrief search <query> [--top-k N] [--no-deps]
 ```
 
 - `--top-k` defaults to 10.
-- Returns ranked code chunks with file path, line range, relevance
-  score, and chunk metadata.
+- Returns ranked code chunks from the project and, by default, from
+  dependency indexes. Dependency results are labeled `[dep: crate_name]`
+  after the score in the output.
+- `--no-deps` excludes dependency results entirely (also skips the
+  dep-index freshness check).
 - Each result is prefixed with a `// in crate::module` context comment
   identifying the containing module, followed by the chunk's `display_text`.
   Embeddings are computed from `embedding_text` (which includes additional
@@ -310,6 +317,8 @@ using additive boosts (scores may exceed 1.0):
 - **Exact symbol name match** (case-insensitive): `+0.3`
 - **Partial symbol name match** (substring in either direction,
   case-insensitive): `+0.1`
+- **Dependency origin penalty**: `-0.1` applied to all dependency chunks,
+  preventing dep results from crowding out project results.
 
 This provides exact-lookup precision within the search command without
 a separate symbol lookup command or BM25 keyword index.
@@ -329,6 +338,7 @@ Retrieve a file-level overview showing only declarations and signatures.
 
 ```
 cargo debrief overview <file>
+cargo debrief overview --dep <crate_name>
 ```
 
 - Shows struct/enum/trait definitions, function signatures, impl blocks —
@@ -339,6 +349,10 @@ cargo debrief overview <file>
   full implementation.
 - Automatically checks index freshness and re-indexes if needed before
   retrieving the overview (implicit auto-indexing).
+- `--dep <crate_name>` retrieves the overview for a dependency crate
+  from the deps index (`deps-index.bin`) without re-embedding. Requires
+  the dependency index to have been built (via `rebuild-index` or implicit
+  auto-indexing on first `search`).
 
 ## Configuration
 
@@ -525,7 +539,7 @@ Tree-sitter-based parsing with per-language grammar support.
 > - Adding a language requires implementing the Chunker trait — there
 >   is no automatic/generic fallback chunking.
 
-## 🚧 Dependency Indexing
+## Dependency Indexing
 
 Index public API surfaces of project dependencies so that search covers
 dependency types, traits, and functions alongside project code.
@@ -539,14 +553,31 @@ dependency types, traits, and functions alongside project code.
 - Dependency index stored separately (`.git/debrief/deps-index.bin`).
   Staleness tracked via `Cargo.lock` content hash — re-index only
   when dependencies change.
-- Search merges project and dependency indexes. Project chunks receive
-  a score boost over dependency chunks to prevent crowding.
 - Each dependency chunk's `embedding_text` includes a root-dependency
-  annotation (e.g., `// Crate: bevy_ecs (dependency of: bevy)`) to
+  annotation (e.g., `[dependency] bevy_ecs (dependency of: bevy)`) to
   bridge the vocabulary gap between user queries and transitive dep
   names.
 - Git submodules treated as dependencies (not project source). Details
   deferred to C++ chunker stage.
+
+### Dependency Search Integration
+
+Search merges project and dependency indexes by default. Dependency
+results are deprioritized by a `-0.1` score penalty (see Metadata Score
+Boosting) and labeled `[dep: crate_name]` in the output. Use `--no-deps`
+to exclude dependency results entirely.
+
+### Dependency Overview
+
+```
+cargo debrief overview --dep <crate_name>
+```
+
+Retrieves the public API overview of an indexed dependency crate directly
+from `deps-index.bin`, filtered to overview chunks only, ordered by
+visibility. No re-embedding required.
+
+### Dependency Exclude Configuration
 
 ```toml
 # .debrief/config.toml
@@ -554,16 +585,21 @@ dependency types, traits, and functions alongside project code.
 exclude = ["syn", "proc-macro2"]  # skip large, rarely searched crates
 ```
 
+Packages listed in `[dependencies].exclude` are filtered out before
+chunking during `run_deps_index`. Matching is by crate name. The field
+uses overlay-replace semantics — project config replaces global rather
+than appending.
+
 ### 🚧 Language-Specific Dependency Detection
 
-| Language | Auto-detection | Fallback |
-|----------|---------------|----------|
-| **Rust** | `cargo metadata` → dep source paths + public API filtering | — |
-| **C++** | `compile_commands.json` → include paths | `debrief dep cpp-include <path>` |
-| **Python** | Active venv `site-packages` + `.pyi` stubs | `debrief dep py-packages <venv-path>` |
+| Language | Auto-detection | Fallback | Status |
+|----------|---------------|----------|--------|
+| **Rust** | `cargo metadata` → dep source paths + public API filtering | — | Implemented |
+| **C++** | `compile_commands.json` → include paths | `debrief dep cpp-include <path>` | Planned |
+| **Python** | Active venv `site-packages` + `.pyi` stubs | `debrief dep py-packages <venv-path>` | Planned |
 
 - Rust: fully automatic via `cargo metadata`. Public API filtered by
-  `pub` visibility on chunks (tree-sitter based).
+  `pub` visibility on chunks (tree-sitter based). Implemented.
 - C++: `compile_commands.json` (generated by CMake) is the primary
   source. Git submodules treated as dependencies. Manual fallback via
   CLI command for unsupported build systems.

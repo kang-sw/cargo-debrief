@@ -51,15 +51,19 @@ One-time cost; re-index only when `Cargo.lock` changes.
 ### Embedding text enrichment: root dependency annotation
 
 For each transitive dep, compute which of the user's direct dependencies
-it is reachable from (BFS on the dependency graph). Add a single line to
-`embedding_text`:
+it is reachable from (BFS on the dependency graph). Prepend a `[dependency]`
+tag line to `embedding_text`:
 
 ```
-// Crate: bevy_ecs (dependency of: bevy)
+[dependency] bevy_ecs (dependency of: bevy)
+// bevy_ecs::query (src/query/mod.rs:15-42)
+pub struct Query<Q, F = ()> { ... }
 ```
 
-This bridges the vocabulary gap — a query mentioning "bevy" matches
-chunks in `bevy_ecs` because "bevy" appears in the embedding text.
+The `[dependency]` tag creates a clear signal in the embedding vector
+itself, complementing origin-based score boosting. This bridges the
+vocabulary gap — a query mentioning "bevy" matches chunks in `bevy_ecs`
+because "bevy" appears in the embedding text.
 
 ### Staleness: `Cargo.lock` content hash
 
@@ -83,7 +87,7 @@ dependency results from crowding out project code.
 The existing metadata boosting mechanism in `search.rs` extends to
 support origin-based boosting.
 
-CLI flag: `--include-deps` (default: true? false? — decide at impl time).
+CLI flag: `--no-deps` to disable (default: ON — dependency search is included unless explicitly disabled).
 
 ### Chunk model: `ChunkOrigin` enum
 
@@ -117,12 +121,13 @@ chunker stage where submodule-as-dependency is the primary pattern.
 Current `git ls-files` does not recurse into submodules, so they are
 already excluded from project indexing.
 
-## Pre-requisite: GPU acceleration
+## GPU Acceleration Note
 
-Before dependency indexing increases embedding volume, add GPU-first
-execution provider to `Embedder::load` (CoreML on macOS, CUDA on
-Linux/Windows, CPU fallback). Feature-flag gated (`gpu`, `cuda`).
-Small scope — session builder config change only.
+GPU acceleration for the ONNX embedder is tracked in a separate ticket
+(`260404-fix-gpu-acceleration`). The CPU path is sufficient for initial
+implementation — the scale estimates in this ticket (8–50s) are based
+on CPU. GPU will naturally reduce those times when the fix lands, but
+does not block this feature.
 
 ## Phases
 
@@ -145,20 +150,18 @@ Small scope — session builder config change only.
 
 - Merge project + dependency indexes at search time
 - Origin-based score boosting
-- CLI `--include-deps` flag
+- CLI `--no-deps` flag (default ON; flag disables dependency search)
 - Config: dependency exclude list
 - Update `overview` to optionally show dependency types
 
 ## Open Questions
 
-- Default for `--include-deps`: on or off? (On seems more useful, but
-  could surprise users with unfamiliar results.)
+- **RESOLVED** — `--include-deps` default: dependency search is ON by
+  default; `--no-deps` disables it.
 - Should `overview` work on dependency files? (Useful but path resolution
-  is different.)
-- Per-package version tracking for incremental dep re-indexing (optimization,
-  not needed for initial impl).
-- Interaction with daemon mode: daemon could cache dep indexes in memory
-  across CLI invocations, avoiding disk reads.
+  is different — keep open for now.)
+- Per-package version tracking for incremental dep re-indexing: future
+  optimization; note in spec when implemented.
 
 ## Config
 
