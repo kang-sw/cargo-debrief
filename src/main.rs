@@ -47,20 +47,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let project_root = std::env::current_dir()?;
-    let config_paths = cargo_debrief::config::config_paths(&project_root);
-    let config = cargo_debrief::config::load_config(&config_paths)?;
-    let service = InProcessService::new(config);
+    let service = InProcessService::new();
 
     match cli.command {
         Command::Index { path } => {
-            let result = service.index(&path).await?;
+            let result = service.index(&project_root, &path).await?;
             println!(
                 "Indexed {} files, {} chunks created.",
                 result.files_indexed, result.chunks_created
             );
         }
         Command::Search { query, top_k } => {
-            let results = service.search(&query, top_k).await?;
+            let results = service.search(&project_root, &query, top_k).await?;
             for (i, r) in results.iter().enumerate() {
                 println!(
                     "#{} [score: {:.4}] {}:{}-{}",
@@ -75,11 +73,13 @@ async fn main() -> Result<()> {
             }
         }
         Command::GetSkeleton { file } => {
-            let skeleton = service.get_skeleton(&file).await?;
+            let skeleton = service.get_skeleton(&project_root, &file).await?;
             println!("{skeleton}");
         }
         Command::SetEmbeddingModel { model, global } => {
-            service.set_embedding_model(&model, global).await?;
+            service
+                .set_embedding_model(&project_root, &model, global)
+                .await?;
             let scope = if global { "global" } else { "project" };
             println!("Embedding model set to {model:?} ({scope}).");
         }

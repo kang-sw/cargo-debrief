@@ -6,6 +6,7 @@ related:
   - 260404-feat-core-indexing-pipeline  # depends on trait shape
 plans:
   phase-1: null
+started: 2026-04-04
 ---
 
 # DebriefService Trait — Multi-Workspace Support
