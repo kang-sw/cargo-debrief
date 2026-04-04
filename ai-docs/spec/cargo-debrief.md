@@ -7,7 +7,7 @@ features:
     - 🚧 Local Storage (`.git/debrief/`)
     - 🚧 Global Configuration
   - Code Indexing
-    - 🚧 AST-Aware Chunking
+    - AST-Aware Chunking
     - 🚧 Cross-File Skeleton Assembly
     - 🚧 Dual Text Representation
     - 🚧 Chunk Metadata
@@ -106,10 +106,10 @@ cargo debrief rebuild-index
   (implicit auto-indexing) — `rebuild-index` is reserved for forced
   full re-index or recovery scenarios.
 
-### 🚧 AST-Aware Chunking
+### AST-Aware Chunking
 
 Source files are parsed with tree-sitter into chunks at semantic
-boundaries rather than fixed token counts. Two chunk types:
+boundaries rather than fixed token counts. Three chunk types:
 
 **Type overview chunk** (per type, one per struct/enum/trait):
 
@@ -121,7 +121,7 @@ struct ConnectionPool {
 }
 
 impl ConnectionPool {
-    fn new(max_size: usize) -> Self;
+    fn new(max_size: usize) -> Self { Self { connections: vec![], max_size } }
     fn acquire(&self) -> Option<&Connection>;
     fn release(&mut self, conn: Connection);
 }
@@ -131,10 +131,24 @@ impl Drop for ConnectionPool {
 }
 ```
 
-Contains the type definition and all method signatures (no bodies).
-Multiple `impl` blocks within the same file are aggregated.
+Contains the type definition and all method signatures. Methods with 5 or
+fewer lines are inlined with their full body; larger methods appear as
+signature-only. Multiple `impl` blocks within the same file are aggregated.
 
-**Function chunk** (per function/method):
+**Module overview chunk** (per file, one per file that has free functions):
+
+```rust
+// crate::net::pool
+pub fn init_pool(max_size: usize) -> ConnectionPool { ConnectionPool::new(max_size) }
+pub fn shutdown_pool(pool: ConnectionPool);
+```
+
+Aggregates all free functions in the file. Small free functions (5 lines or
+fewer) are inlined with their full body; larger ones appear as
+signature-only. The `symbol_name` is the leaf module name; `kind` is
+`module`; `chunk_type` is `overview`.
+
+**Function chunk** (per large function/method):
 
 ```rust
 // src/pool.rs
@@ -145,10 +159,14 @@ impl ConnectionPool {
 }
 ```
 
-Contains a single function body wrapped in its parent `impl` context.
-Free functions include module path context instead.
+Generated only for functions/methods exceeding 5 lines. Contains a single
+function body wrapped in its parent `impl` context (for methods) or the
+module path header (for free functions).
 
 > [!note] Constraints
+> - The 5-line threshold (`MIN_METHOD_CHUNK_LINES`) controls inlining.
+>   Functions at or below this threshold are inlined into their parent
+>   overview chunk and do not receive a standalone function chunk.
 > - Chunking quality depends on tree-sitter grammar availability for
 >   the target language.
 > - Very large functions (>200 lines) may need sub-function splitting

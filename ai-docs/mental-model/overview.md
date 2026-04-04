@@ -20,7 +20,7 @@
 
 ## Module Contracts
 
-- `main.rs` guarantees it constructs config from `current_dir()` at startup, then constructs exactly one `InProcessService`. No lazy initialization.
+- `main.rs` resolves `current_dir()` as project root, constructs one `InProcessService` (zero-sized), and dispatches subcommands. Config is loaded per-operation inside service methods, not at startup.
 - `lib.rs` guarantees all modules usable as a library are declared `pub mod` here. Modules that exist only in `main.rs` are invisible to integration tests.
 
 ## Coupling
