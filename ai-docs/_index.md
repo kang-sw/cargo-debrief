@@ -109,7 +109,7 @@ See `ai-docs/mental-model/` for operational knowledge:
 ```
 A✓ Usability test (ripgrep)        — validate search quality on real codebase
 C✓ Dependency chunking             — index transitive deps, public API only
-D~ Daemon mode (2A+2B done, 2C pending) — per-workspace, FIFO/file RPC, ~3 min idle
+D✓ Daemon mode                     — per-workspace, FIFO/file RPC, ~3 min idle, auto-spawn
 E  LLM chunk summarization         — external LLM for embedding text enrichment
 B  Rust chunking population        — additional node kinds, informed by A results
 D  C++/Python chunkers             — language expansion
@@ -140,3 +140,4 @@ Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunkin
 - Dependency Chunking Phase 3: Unified search (project + dep chunks in single SearchIndex), DEP_ORIGIN_PENALTY 0.1, --no-deps CLI flag, dep_overview + --dep on overview, config exclude list, [dep: crate_name] output label. Spec updated, 🚧 removed from Dependency Indexing.
 - MCP server mode removed from spec and docs (user decision: will not be implemented).
 - Daemon Mode Phase 2A+2B: daemon.rs (lifecycle, PID flock, 3-min idle, debug binary guard), ipc/ module (Unix FIFO + Windows atomic-rename, length-prefixed JSON, flock client serialization), DaemonClient + Service enum in service.rs, daemon status/stop + hidden __daemon in main.rs. Auto-spawn deferred to Phase 2C.
+- Daemon Mode Phase 2C: auto_spawn_and_connect (flock-serialized spawn, readiness polling, stale PID cleanup), Service struct (Option<DaemonClient> + InProcessService, silent fallback), resolve_service in main.rs. Race conditions R1-R10 mitigated. Daemon mode fully implemented, 🚧 removed from spec.
