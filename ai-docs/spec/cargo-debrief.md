@@ -334,7 +334,7 @@ cargo debrief overview <file>
 - Shows struct/enum/trait definitions, function signatures, impl blocks —
   but not function bodies.
 - Output is ordered by visibility: `pub` items first, then `pub(crate)`,
-  then private.
+  then `pub(super)`, then private.
 - Useful for understanding a file's API surface without reading the
   full implementation.
 - Automatically checks index freshness and re-indexes if needed before

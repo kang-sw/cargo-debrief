@@ -124,3 +124,5 @@ Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunkin
 - Spec updated: `set-embedding-model` → unified `config <key> [value] [--global]`. LLM chunk summarization feature added (external OpenAI-compatible endpoint for overview chunk summaries).
 - Roadmap: A→C→D*→E→B→D. E = LLM chunk summarization (`260404-feat-llm-chunk-summarization`).
 - cargo-brief output format reviewed for reference. Adopting: module context line in search output (Phase 3).
+- P1 micro-chunk merging implemented (≤5-line method inlining, module overview chunks). INDEX_VERSION 3.
+- Phase 3 UX: overview ordering by visibility (pub→pub(crate)→pub(super)→private), search results prefixed with `// in crate::module` context line.
