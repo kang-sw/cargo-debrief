@@ -69,10 +69,17 @@ Option 1 is simplest and addresses the symptom directly.
 public API. Sort: `pub` items first, then `pub(crate)`, then private.
 Change is in the overview rendering path, not the chunker.
 
-**P3: Progress feedback.** Add progress output during indexing:
-- File count: `chunking file 45/100...`
-- Embedding batch: `embedding batch 3/12...`
-- Use stderr (not stdout) to keep stdout clean for piping.
+**P3: Progress feedback.** Add minimal, LLM-friendly progress output.
+No CLI animation (progress bars, spinners). Print `indexing` once,
+then append a `.` every ~3 seconds (no newline), then newline + done:
+
+```
+indexing..........
+done. 1332 chunks, 100 files.
+```
+
+Single growing line via `eprint!(".")` + `flush()`.
+Output to stderr to keep stdout clean for piping.
 
 ### Success criteria
 
