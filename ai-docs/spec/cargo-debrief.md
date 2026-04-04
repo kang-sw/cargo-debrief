@@ -491,26 +491,43 @@ HNSW index loaded in memory, eliminating ~2-4 seconds of startup
 overhead on repeated CLI calls. In-process mode is the fallback when
 the daemon is unavailable.
 
+Phase 2A+2B (daemon lifecycle and IPC transport) is implemented. Phase 2C
+(automatic transparent spawn on first CLI use) is not yet implemented.
+
 - **Per-workspace.** One daemon per project root (not system-wide).
-- First CLI invocation transparently spawns the daemon if not running.
 - **~3 minute idle expiry.** Short lifespan — purpose is eliminating
   delay during burst usage (e.g., AI agent sessions), not long-term
-  persistence.
-- **Temp-file-based RPC.** Avoids sandbox restrictions that affect Unix
-  sockets and named pipes. Request/response via temp files in a known
-  directory.
-- **Discovery.** PID file in `.git/debrief/` (workspace-local).
-- CLI detects daemon availability and falls back to in-process mode
-  if the daemon is not running or cannot be spawned.
-- In debug builds, CLI compares binary identity with the running daemon
-  and kills/restarts on mismatch to prevent stale daemon processes
-  during development.
+  persistence. Configurable via `CARGO_DEBRIEF_DAEMON_TIMEOUT` (seconds).
+- **Platform-specific IPC.** Unix: FIFO pair + `flock` serialization.
+  Windows: atomic-rename file protocol + `LockFileEx` serialization.
+  Framing: 4-byte little-endian length prefix + JSON payload.
+- **Discovery.** PID file at `.git/debrief/daemon/daemon.pid`
+  (workspace-local). Advisory file lock prevents concurrent start races.
+- **Fallback.** CLI tries to connect to a running daemon on startup. If
+  the daemon is not running, falls back to in-process service silently.
+  Auto-spawn (Phase 2C) is not yet implemented — the daemon must be
+  started manually.
+- In debug builds, CLI compares binary mtime with the running daemon
+  (`daemon.exe_mtime` marker) and force-kills stale daemons on mismatch.
+
+**Daemon CLI:**
+
+```
+cargo debrief daemon status
+cargo debrief daemon stop
+```
+
+- `daemon status`: reports whether the daemon is running, its PID, and
+  uptime in seconds. Queries via IPC if the daemon is alive.
+- `daemon stop`: sends a Stop request via IPC; falls back to force-kill
+  if IPC fails.
 
 > [!note] Constraints
-> - Phase 1 uses in-process execution (no daemon). The `DebriefService`
->   trait accepts a project root per operation, so the switch to daemon
->   mode is transparent.
-> - Temp-file RPC protocol details TBD.
+> - Auto-spawn (Phase 2C) is not yet implemented. The daemon must be
+>   started externally; CLI falls back to in-process if daemon is absent.
+> - IPC uses platform FIFOs (Unix) or atomic-rename files (Windows).
+>   Sandboxed environments that restrict named pipes may prevent daemon
+>   connectivity; in-process fallback still works in those cases.
 
 ## 🚧 Language Support
 
