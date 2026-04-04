@@ -163,6 +163,11 @@ False negatives (incomplete skeleton) are acceptable — the individual
 `impl` chunks still exist and are searchable. False positives
 (incorrectly merged impls from different types) are not acceptable.
 
+> [!note] Constraints
+> - Generic type parameters are stripped when keying impl blocks:
+>   `impl Foo<Bar>` and `impl Foo<Baz>` are both aggregated under `Foo`.
+>   Methods from all specializations appear in the same overview chunk.
+
 ### 🚧 Dual Text Representation
 
 Each chunk stores two text fields, optimized for different consumers:
@@ -205,7 +210,7 @@ presentation without relying on a separate keyword index.
 | `symbol_name` | `ConnectionPool::new` | Exact-match score boosting |
 | `kind` | function, struct, trait, impl, enum, module | Filtering by symbol kind |
 | `parent` | `ConnectionPool` | Skeleton linkage |
-| `visibility` | pub, pub(crate), private | Filter by API surface |
+| `visibility` | pub, pub(crate), pub(super), private | Filter by API surface |
 | `file_path` | `src/pool.rs` | Source location |
 | `line_range` | `42..87` | Source reference |
 | `chunk_type` | overview, function | Chunk kind |
