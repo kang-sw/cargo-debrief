@@ -222,28 +222,40 @@ pub fn send_command(
         break; // EAGAIN (no data) or EOF
     }
 
-    // 5. Poll for response with timeout
-    let timeout_ms: libc::c_int = timeout.as_millis().try_into().unwrap_or(libc::c_int::MAX);
-    let mut pfd = libc::pollfd {
-        fd: resp_fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let n = poll_retry(&mut pfd, timeout_ms)?;
-    if n == 0 {
-        bail!(
-            "timed out waiting for daemon response ({}s)",
-            timeout.as_secs()
-        );
-    }
-
-    // 6. Switch to blocking and read the response
+    // 5. Switch to blocking mode and loop reading responses.
+    // Progress keepalives reset the per-message deadline; the final response exits the loop.
+    // `timeout` is the per-message deadline — the daemon sends Progress every 10s so any
+    // value ≥ 30s gives ample margin.
     set_nonblocking(&resp_fd, false)?;
     let mut resp_fd = resp_fd;
-    let response: DaemonResponse = read_message(&mut resp_fd)?;
 
-    // flock auto-released on lock_file drop
-    Ok(response)
+    let per_msg_ms: libc::c_int = timeout.as_millis().try_into().unwrap_or(libc::c_int::MAX);
+
+    loop {
+        let mut pfd = libc::pollfd {
+            fd: resp_fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let n = poll_retry(&mut pfd, per_msg_ms)?;
+        if n == 0 {
+            bail!(
+                "timed out waiting for daemon response ({}s per-message limit)",
+                timeout.as_secs()
+            );
+        }
+
+        let response: DaemonResponse = read_message(&mut resp_fd)?;
+        match response {
+            DaemonResponse::Progress { .. } => {
+                // Keepalive received — daemon is still working, continue waiting.
+            }
+            other => {
+                // flock auto-released on lock_file drop
+                return Ok(other);
+            }
+        }
+    }
 }
 
 /// Remove IPC-specific files (req, resp, lock).
