@@ -101,3 +101,4 @@ See `ai-docs/mental-model/` for operational knowledge:
 - Phase 1B core indexing pipeline implemented: chunk model, tree-sitter Rust chunking, git tracking, index serialization.
 - Service trait refactored: `project_root: &Path` added to all `DebriefService` methods; `InProcessService` is now zero-sized; config loading removed from `main.rs`.
 - Phase 1C search pipeline implemented: embedder.rs (ONNX inference via ort, model registry with nomic-embed-text-v1.5 + bge-large-en-v1.5, streaming download, mean pooling + L2 norm), search.rs (hnsw_rs ANN, metadata symbol-name boosting), config save_config, set_embedding_model wired.
+- Phase 1D integration & polish: end-to-end wiring of `index`, `search`, `overview` in InProcessService. Implicit auto-indexing via `ensure_index_fresh`. CLI renames: `index` → `rebuild-index`, `get-skeleton` → `overview`. Smoke test protocol added.

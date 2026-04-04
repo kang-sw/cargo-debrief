@@ -172,3 +172,29 @@ Versions are approximate — verify latest at implementation time.
 - `ort` pinned to `2.0.0-rc.12` (pre-release; cargo rejects `"^2"`)
 - `ndarray` not needed — used tuple tensor construction instead
 - Model named `nomic-embed-text-v1.5` (no separate `nomic-embed-code` ONNX export exists)
+
+### Phase 1D — Integration & Polish (completed 2026-04-04)
+
+**End-to-end wiring** (`src/service.rs`, +219/-50 lines):
+- `InProcessService::index` — full reindex pipeline: config → git changes → RustChunker → embed_batch → save_index
+- `InProcessService::search` — ensure_index_fresh → flatten chunks → SearchIndex::build → search
+- `InProcessService::overview` — ensure_index_fresh → filter ChunkType::Overview → join display_text
+- `ensure_index_fresh` — compares HEAD commit and model name against stored index, triggers incremental or full reindex as needed
+- Private helpers: `index_path`, `make_embedder`, `run_index` (shared by explicit and implicit indexing)
+
+**CLI renames**:
+- `index` → `rebuild-index` (manual recovery, no path argument)
+- `get-skeleton` → `overview` (matches internal ChunkType::Overview)
+- Implicit auto-indexing on `search` and `overview`
+
+**Smoke test results** (self-hosted, 13 files, 144 chunks):
+- `search "chunking"` → #1 Chunk struct (0.76), #2 Chunker trait (0.72)
+- `search "DebriefService"` → #1 trait def (0.92), +0.35 gap from symbol boost
+- `overview src/chunk.rs` → 5 type definitions shown
+
+**Tests**: 37 passing, 2 ignored. Net -1 from stub test removal.
+
+**Deviations from plan**:
+- `embed_batch` called synchronously (spawn_blocking deferred as tech debt)
+- `_path` parameter on `index` silently ignored (removed from CLI, trait parameter kept for future use)
+- `SearchIndex::build` clones all chunks from IndexData (optimization deferred)
