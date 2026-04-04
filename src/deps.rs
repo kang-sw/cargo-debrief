@@ -39,6 +39,10 @@ pub fn discover_dependency_packages(project_root: &Path) -> Result<Vec<DepPackag
 
     let resolve = metadata.resolve.as_ref().expect("resolve graph missing");
 
+    // Package lookup by id for name resolution.
+    let pkg_by_id: HashMap<&PackageId, &cargo_metadata::Package> =
+        metadata.packages.iter().map(|p| (&p.id, p)).collect();
+
     // Build adjacency map: PackageId -> Vec<PackageId>
     let adjacency: HashMap<&PackageId, Vec<&PackageId>> = resolve
         .nodes
@@ -49,14 +53,18 @@ pub fn discover_dependency_packages(project_root: &Path) -> Result<Vec<DepPackag
         })
         .collect();
 
-    // Collect root dep seeds: direct deps of workspace members (by PackageId -> name)
+    // Collect root dep seeds: direct deps of workspace members (by PackageId -> name).
+    // Use package.name from the metadata to preserve the original hyphenated crate name
+    // (e.g. "tree-sitter", not the Rust identifier form "tree_sitter").
     let mut root_dep_seeds: HashMap<&PackageId, String> = HashMap::new();
     for node in &resolve.nodes {
         if workspace_member_ids.contains(&node.id) {
             for node_dep in &node.deps {
-                root_dep_seeds
-                    .entry(&node_dep.pkg)
-                    .or_insert_with(|| node_dep.name.replace('-', "_"));
+                if let Some(pkg) = pkg_by_id.get(&node_dep.pkg) {
+                    root_dep_seeds
+                        .entry(&node_dep.pkg)
+                        .or_insert_with(|| pkg.name.clone());
+                }
             }
         }
     }
