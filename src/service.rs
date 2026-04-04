@@ -203,12 +203,28 @@ async fn run_index(
         per_file_chunks.push((rel_path.clone(), chunks));
     }
 
-    // Embed all texts in one batch.
+    // Embed texts in fixed-size batches to bound peak memory.
+    const EMBED_BATCH_SIZE: usize = 64;
     let embeddings: Vec<Vec<f32>> = if all_embedding_texts.is_empty() {
         vec![]
     } else {
-        let text_refs: Vec<&str> = all_embedding_texts.iter().map(|s| s.as_str()).collect();
-        embedder.embed_batch(&text_refs)?
+        use std::io::Write;
+        eprint!("indexing");
+        let _ = std::io::stderr().flush();
+
+        let mut accumulated = Vec::with_capacity(all_embedding_texts.len());
+        for batch in all_embedding_texts.chunks(EMBED_BATCH_SIZE) {
+            let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+            accumulated.extend(embedder.embed_batch(&text_refs)?);
+            eprint!(".");
+            let _ = std::io::stderr().flush();
+        }
+        eprintln!(
+            "\ndone. {} chunks, {} files.",
+            all_embedding_texts.len(),
+            files_to_embed.len()
+        );
+        accumulated
     };
 
     // Assign embeddings back to chunks by position and insert into the index.

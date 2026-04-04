@@ -7,7 +7,7 @@ wrapper, all logic behind `lib.rs`):
 
 ```
 src/
-  main.rs       — CLI entrypoint (clap): rebuild-index, search, overview, set-embedding-model
+  main.rs       — CLI entrypoint (clap): rebuild-index, search, overview, config
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
   service.rs    — DebriefService trait (async RPITIT, project_root per method) + InProcessService (zero-sized)
@@ -28,9 +28,10 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 
 ## Key Design Decisions
 
-- **CLI-first with daemon**: Primary interface is CLI. Background daemon
-  is lazy-spawned on first use, auto-expires on idle, serves all requests
-  on the machine. MCP server mode layered on top later.
+- **CLI-first with per-workspace daemon**: Primary interface is CLI.
+  Per-workspace daemon lazy-spawned on first use, ~3 min idle expiry.
+  Holds ONNX session + HNSW index in memory (eliminates 2-4s startup).
+  Temp-file-based RPC for sandbox compatibility. MCP layered later.
 - **No external DB**: vectors stored in-memory as `Vec<[f32; N]>`, serialized
   to disk with bincode (versioned format).
 - **Vector search + metadata boosting**: cosine similarity with hnsw_rs,
@@ -42,8 +43,8 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
   against HEAD to find changed files. Prioritize validating this early.
 - **Rust-first, language-extensible**: Start with tree-sitter-rust. Chunker
   trait allows adding more languages later.
-- **Embedding model management**: auto-download default model, configurable
-  per-project or globally via `set-embedding-model`.
+- **Unified config**: `cargo debrief config <key> [value] [--global]`.
+  Replaces `set-embedding-model`. Manages embedding model, LLM endpoint, etc.
 
 ## Spec
 
@@ -63,7 +64,7 @@ CARGO_DEBRIEF_SKIP_NETWORK=1 cargo test              # skip network tests (no mo
 cargo run -- rebuild-index [<path>]                  # full re-index (manual/recovery)
 cargo run -- search "query" [--top-k N]              # vector search + metadata boosting (auto-indexes)
 cargo run -- overview <file>                         # file-level overview (auto-indexes)
-cargo run -- set-embedding-model [--global] <name>   # configure model
+cargo run -- config <key> [value] [--global]          # get/set configuration
 cargo run -- daemon status                           # check daemon
 ```
 
@@ -94,6 +95,21 @@ See `ai-docs/mental-model/` for operational knowledge:
 - `embedder.md` — ModelRegistry, Embedder, ONNX inference, model download
 - `search.md` — SearchIndex, hnsw_rs ANN, metadata boosting
 
+## Post-MVP Roadmap
+
+```
+A  Usability test (ripgrep)        — validate search quality on real codebase
+C  Dependency chunking             — index transitive deps, public API only
+D* Daemon mode                     — per-workspace, temp-file RPC, ~3 min idle
+E  LLM chunk summarization         — external LLM for embedding text enrichment
+B  Rust chunking population        — additional node kinds, informed by A results
+D  C++/Python chunkers             — language expansion
+```
+
+Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunking` (C),
+`260404-feat-daemon-mode` (D*), `260404-feat-llm-chunk-summarization` (E),
+`260404-feat-rust-chunking-population` (B)
+
 ## Session Notes
 
 - Initial project setup. Research ticket captures architecture discussion.
@@ -102,3 +118,9 @@ See `ai-docs/mental-model/` for operational knowledge:
 - Service trait refactored: `project_root: &Path` added to all `DebriefService` methods; `InProcessService` is now zero-sized; config loading removed from `main.rs`.
 - Phase 1C search pipeline implemented: embedder.rs (ONNX inference via ort, model registry with nomic-embed-text-v1.5 + bge-large-en-v1.5, streaming download, mean pooling + L2 norm), search.rs (hnsw_rs ANN, metadata symbol-name boosting), config save_config, set_embedding_model wired.
 - Phase 1D integration & polish: end-to-end wiring of `index`, `search`, `overview` in InProcessService. Implicit auto-indexing via `ensure_index_fresh`. CLI renames: `index` → `rebuild-index`, `get-skeleton` → `overview`. Smoke test protocol added.
+- Post-MVP roadmap defined: A→C→D*→B→D ordering. Daemon revised to per-workspace with temp-file RPC. Dependency chunking: all transitive, pub API only, root-dep annotation in embedding text.
+- P0 batch split implemented (64-chunk batches). GPU EP registered (CoreML/CUDA behind feature flags). CoreML unstable (41GB RSS, context leak). CPU path verified on full ripgrep: 3070 chunks, 100 files, 9m37s.
+- Full-repo search quality: 15/24 (62.5%). S1/T3 regressions from micro-chunk dilution — P1 merging designed (minimum body threshold + module overview chunk).
+- Spec updated: `set-embedding-model` → unified `config <key> [value] [--global]`. LLM chunk summarization feature added (external OpenAI-compatible endpoint for overview chunk summaries).
+- Roadmap: A→C→D*→E→B→D. E = LLM chunk summarization (`260404-feat-llm-chunk-summarization`).
+- cargo-brief output format reviewed for reference. Adopting: module context line in search output (Phase 3).

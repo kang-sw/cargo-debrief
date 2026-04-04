@@ -7,7 +7,7 @@ features:
     - 🚧 Local Storage (`.git/debrief/`)
     - 🚧 Global Configuration
   - Code Indexing
-    - 🚧 AST-Aware Chunking
+    - AST-Aware Chunking
     - 🚧 Cross-File Skeleton Assembly
     - 🚧 Dual Text Representation
     - 🚧 Chunk Metadata
@@ -16,7 +16,10 @@ features:
     - Vector Similarity Search
     - Metadata Score Boosting
   - Overview
-  - Embedding Model Management
+  - Configuration (`config` subcommand)
+    - Embedding Model Management
+    - 🚧 GPU Acceleration
+  - 🚧 LLM Chunk Summarization
   - Index Persistence
   - 🚧 Daemon Mode
   - 🚧 MCP Server
@@ -72,7 +75,8 @@ automatically invisible to git status.
 User-level defaults stored in a platform-standard config directory
 (e.g., `~/.config/debrief/`).
 
-- Global embedding model preference (`set-embedding-model --global`)
+- Global preferences (embedding model, LLM endpoint, etc.) set via
+  `config <key> <value> --global`
 - Default chunking options
 - Project-level config (`.debrief/config.toml`) overrides global.
   Local config (`.git/debrief/local-config.toml`) overrides both.
@@ -102,10 +106,10 @@ cargo debrief rebuild-index
   (implicit auto-indexing) — `rebuild-index` is reserved for forced
   full re-index or recovery scenarios.
 
-### 🚧 AST-Aware Chunking
+### AST-Aware Chunking
 
 Source files are parsed with tree-sitter into chunks at semantic
-boundaries rather than fixed token counts. Two chunk types:
+boundaries rather than fixed token counts. Three chunk types:
 
 **Type overview chunk** (per type, one per struct/enum/trait):
 
@@ -117,7 +121,7 @@ struct ConnectionPool {
 }
 
 impl ConnectionPool {
-    fn new(max_size: usize) -> Self;
+    fn new(max_size: usize) -> Self { Self { connections: vec![], max_size } }
     fn acquire(&self) -> Option<&Connection>;
     fn release(&mut self, conn: Connection);
 }
@@ -127,10 +131,24 @@ impl Drop for ConnectionPool {
 }
 ```
 
-Contains the type definition and all method signatures (no bodies).
-Multiple `impl` blocks within the same file are aggregated.
+Contains the type definition and all method signatures. Methods with 5 or
+fewer lines are inlined with their full body; larger methods appear as
+signature-only. Multiple `impl` blocks within the same file are aggregated.
 
-**Function chunk** (per function/method):
+**Module overview chunk** (per file, one per file that has free functions):
+
+```rust
+// crate::net::pool
+pub fn init_pool(max_size: usize) -> ConnectionPool { ConnectionPool::new(max_size) }
+pub fn shutdown_pool(pool: ConnectionPool);
+```
+
+Aggregates all free functions in the file. Small free functions (5 lines or
+fewer) are inlined with their full body; larger ones appear as
+signature-only. The `symbol_name` is the leaf module name; `kind` is
+`module`; `chunk_type` is `overview`.
+
+**Function chunk** (per large function/method):
 
 ```rust
 // src/pool.rs
@@ -141,10 +159,14 @@ impl ConnectionPool {
 }
 ```
 
-Contains a single function body wrapped in its parent `impl` context.
-Free functions include module path context instead.
+Generated only for functions/methods exceeding 5 lines. Contains a single
+function body wrapped in its parent `impl` context (for methods) or the
+module path header (for free functions).
 
 > [!note] Constraints
+> - The 5-line threshold (`MIN_METHOD_CHUNK_LINES`) controls inlining.
+>   Functions at or below this threshold are inlined into their parent
+>   overview chunk and do not receive a standalone function chunk.
 > - Chunking quality depends on tree-sitter grammar availability for
 >   the target language.
 > - Very large functions (>200 lines) may need sub-function splitting
@@ -311,28 +333,36 @@ cargo debrief overview <file>
 - Automatically checks index freshness and re-indexes if needed before
   retrieving the overview (implicit auto-indexing).
 
-## Embedding Model Management
+## Configuration
 
-Manage the embedding model used for vector search.
+Unified configuration interface using dotted key paths.
 
 ```
-cargo debrief set-embedding-model [--global] <model-name>
+cargo debrief config <key> [value] [--global]
+```
+
+- With `value`: set the key. Without `value`: print current value.
+- `--global` reads/writes global config (`~/.config/debrief/`).
+  Without `--global`, reads/writes project config (`.debrief/config.toml`).
+- `cargo debrief config --list` shows all resolved values with their
+  source (global, project, local, default).
+- Resolution order: local → project → global → default.
+
+### Embedding Model Management
+
+```
+cargo debrief config embedding.model <model-name> [--global]
 ```
 
 - On first use, the default model is automatically downloaded with a
   streaming progress bar. Partial downloads are written to a `.tmp`
   file and renamed atomically on completion.
-- `--global` sets the model in global config (`~/.config/debrief/`).
-- Without `--global`, sets the model in `.debrief/config.toml`
-  (shared with team).
 - Model binary files are cached at `{data_dir}/debrief/models/{model_name}/`
   where `data_dir` is the platform-standard data directory
   (`dirs::data_dir()`, e.g., `~/.local/share` on Linux,
   `~/Library/Application Support` on macOS). Never stored per-project.
-- Active model reference recorded in `.git/debrief/local-config.toml`.
-- Resolution order: local → project → global → default.
-- `set-embedding-model` validates the name against the known model
-  registry; unknown names are rejected with an error.
+- Validates the name against the known model registry; unknown names
+  are rejected with an error.
 
 **Supported models:**
 
@@ -341,11 +371,80 @@ cargo debrief set-embedding-model [--global] <model-name>
 | `nomic-embed-text-v1.5` (default) | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` |
 | `bge-large-en-v1.5` | 1024 | 512 | `BAAI/bge-large-en-v1.5` |
 
+### 🚧 GPU Acceleration
+
+ONNX Runtime execution provider selection with GPU-first, CPU-fallback:
+
+- **macOS**: CoreML (Neural Engine / GPU)
+- **Linux/Windows**: CUDA (NVIDIA GPU)
+- **Fallback**: CPU (always available)
+
+Enabled via cargo feature flags (`gpu`, `cuda`). Default build is
+CPU-only. Provider selection is automatic — if the GPU provider fails
+to initialize, falls back to CPU silently.
+
 > [!note] Constraints
 > - Changing the model invalidates the existing index — a full re-index
 >   is required after switching models.
 > - Only models listed in the built-in registry are accepted.
 >   Arbitrary HuggingFace model names are not supported.
+> - GPU feature flags add build-time dependencies (CoreML framework,
+>   CUDA toolkit). Default build remains dependency-light.
+
+## 🚧 LLM Chunk Summarization
+
+Optional LLM-powered enrichment of overview chunks to improve
+structural semantic search quality. Uses an external
+OpenAI-compatible API endpoint (vLLM, ollama, etc.).
+
+### Configuration
+
+```
+cargo debrief config llm.endpoint "https://vllm.internal/v1" --global
+cargo debrief config llm.token "sk-..." --global
+cargo debrief config llm.model "qwen2.5-coder-7b" --global
+```
+
+```toml
+# config.toml
+[llm]
+endpoint = "https://vllm.internal/v1"
+token = "sk-..."
+model = "qwen2.5-coder-7b"
+```
+
+### Behavior
+
+- When `[llm]` config is present, `rebuild-index` generates a short
+  architectural summary for each **type overview chunk** via
+  `/v1/chat/completions`.
+- The summary is prepended to `embedding_text`, bridging the
+  vocabulary gap between user queries and code structure.
+- If the endpoint is unreachable or returns an error, indexing
+  continues without summaries (warning printed to stderr).
+- Summaries are cached in the index. Only chunks from changed files
+  are re-summarized on incremental re-index.
+- Function-level chunks are not summarized (too many, low ROI).
+
+### Scale
+
+Overview-only summarization keeps volume manageable:
+
+| Project size | Overview chunks | ~Tokens generated | Time @ 250 tok/s |
+|-------------|----------------|-------------------|-----------------|
+| Small (30 files) | ~60 | ~4,500 | ~18s |
+| Medium (100 files) | ~300 | ~22,500 | ~90s |
+| Large (500 files) | ~1,500 | ~112,500 | ~7.5 min |
+
+One-time cost per file; incremental re-index re-summarizes only
+changed files.
+
+> [!note] Constraints
+> - Requires an external LLM server — cargo-debrief does not bundle
+>   or run LLM inference locally.
+> - Summary quality depends on the model. Hallucinated summaries can
+>   degrade search quality. 7B+ code-specialized models recommended.
+> - The `/v1/chat/completions` endpoint must be OpenAI-compatible.
 
 ## Index Persistence
 
@@ -367,25 +466,31 @@ Stored in `.git/debrief/` (local, not committed).
 
 ## 🚧 Daemon Mode
 
-Background service that keeps the index loaded in memory for fast
-repeated queries. **Default execution mode** — CLI connects to the
-daemon for all operations. In-process mode is the fallback when the
-daemon is unavailable.
+Per-workspace background process that keeps the ONNX model session and
+HNSW index loaded in memory, eliminating ~2-4 seconds of startup
+overhead on repeated CLI calls. In-process mode is the fallback when
+the daemon is unavailable.
 
+- **Per-workspace.** One daemon per project root (not system-wide).
 - First CLI invocation transparently spawns the daemon if not running.
-- Daemon serves all CLI requests on the machine (per-machine singleton).
-- A single daemon instance serves **multiple workspaces** — each
-  request carries the project root, and the daemon manages per-workspace
-  state internally.
-- Auto-expires after a configurable idle timeout.
+- **~3 minute idle expiry.** Short lifespan — purpose is eliminating
+  delay during burst usage (e.g., AI agent sessions), not long-term
+  persistence.
+- **Temp-file-based RPC.** Avoids sandbox restrictions that affect Unix
+  sockets and named pipes. Request/response via temp files in a known
+  directory.
+- **Discovery.** PID file in `.git/debrief/` (workspace-local).
 - CLI detects daemon availability and falls back to in-process mode
   if the daemon is not running or cannot be spawned.
+- In debug builds, CLI compares binary identity with the running daemon
+  and kills/restarts on mismatch to prevent stale daemon processes
+  during development.
 
 > [!note] Constraints
-> - IPC mechanism TBD (Unix domain socket, named pipe, or localhost HTTP).
 > - Phase 1 uses in-process execution (no daemon). The `DebriefService`
 >   trait accepts a project root per operation, so the switch to daemon
->   mode is transparent — daemon simply routes by project root internally.
+>   mode is transparent.
+> - Temp-file RPC protocol details TBD.
 
 ## 🚧 MCP Server
 
@@ -415,40 +520,54 @@ Tree-sitter-based parsing with per-language grammar support.
 
 ## 🚧 Dependency Indexing
 
-Index public API skeletons of project dependencies for improved
-search coverage. Deferred — not part of initial implementation.
+Index public API surfaces of project dependencies so that search covers
+dependency types, traits, and functions alongside project code.
 
-```
-cargo debrief rebuild-index . --with-deps
-```
+- Indexes **all transitive dependencies**, public API items only.
+  Indexing all transitive deps avoids the need to resolve `pub use`
+  re-export chains — facade crates (e.g., `bevy`) are covered
+  naturally because their sub-crates are all in the transitive set.
+- Source discovery via `cargo metadata` (Rust). Each package's
+  `manifest_path` locates its source files.
+- Dependency index stored separately (`.git/debrief/deps-index.bin`).
+  Staleness tracked via `Cargo.lock` content hash — re-index only
+  when dependencies change.
+- Search merges project and dependency indexes. Project chunks receive
+  a score boost over dependency chunks to prevent crowding.
+- Each dependency chunk's `embedding_text` includes a root-dependency
+  annotation (e.g., `// Crate: bevy_ecs (dependency of: bevy)`) to
+  bridge the vocabulary gap between user queries and transitive dep
+  names.
+- Git submodules treated as dependencies (not project source). Details
+  deferred to C++ chunker stage.
 
-- Indexes **direct dependencies only** (not transitive).
-- **Skeleton only** — public type signatures, no function bodies.
-- Dependency chunks receive a lower base score than project code,
-  so project results always rank higher by default.
+```toml
+# .debrief/config.toml
+[dependencies]
+exclude = ["syn", "proc-macro2"]  # skip large, rarely searched crates
+```
 
 ### 🚧 Language-Specific Dependency Detection
 
 | Language | Auto-detection | Fallback |
 |----------|---------------|----------|
-| **Rust** | `cargo metadata` → dep locations + public API | — |
+| **Rust** | `cargo metadata` → dep source paths + public API filtering | — |
 | **C++** | `compile_commands.json` → include paths | `debrief dep cpp-include <path>` |
 | **Python** | Active venv `site-packages` + `.pyi` stubs | `debrief dep py-packages <venv-path>` |
 
-- Rust: fully automatic via `cargo metadata`. Rustdoc JSON output
-  may provide more accurate public API extraction than tree-sitter.
+- Rust: fully automatic via `cargo metadata`. Public API filtered by
+  `pub` visibility on chunks (tree-sitter based).
 - C++: `compile_commands.json` (generated by CMake) is the primary
-  source. Visual Studio `.vcxproj` parsing is possible but complex.
-  Manual fallback via CLI command for unsupported build systems.
+  source. Git submodules treated as dependencies. Manual fallback via
+  CLI command for unsupported build systems.
 - Python: detect active virtualenv and index installed packages.
   `.pyi` type stubs are preferred over source when available.
 
-Shared dependency paths go in `.debrief/config.toml` (git-tracked).
-Machine-specific paths go in `.git/debrief/local-config.toml`.
-
 > [!note] Constraints
-> - Dependency skeletons can add ~5K-10K chunks to the index.
->   At project scale (~20K total) this is within hnsw_rs capacity.
+> - Transitive dep indexing can produce ~1.5K-10K chunks depending on
+>   project size. Within hnsw_rs capacity at all scales.
 > - Proc macro generated APIs are not visible to tree-sitter and
 >   will not be indexed.
-> - Deferred until core project-code search quality is validated.
+> - `Cargo.lock`-level staleness means all deps are re-indexed on any
+>   dependency change. Per-package incremental re-indexing is a future
+>   optimization.

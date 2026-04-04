@@ -7,7 +7,7 @@
 
 **cargo-debrief** — A Rust CLI tool that provides RAG
 (Retrieval-Augmented Generation) over codebases. Uses tree-sitter for
-AST-aware chunking and hybrid search (BM25 + vector similarity) to feed
+AST-aware chunking and vector search with metadata boosting to feed
 LLMs only the relevant code fragments, reducing context window consumption.
 CLI-first with a lazy-spawned background daemon for index serving.
 

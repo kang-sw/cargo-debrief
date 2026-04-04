@@ -1,35 +1,57 @@
 ---
-title: "Phase 2 — Daemon Mode"
+title: "Daemon Mode — Per-Workspace Background Process"
 category: feat
 priority: medium
 parent: null
 plans: null
 related:
   - 260403-research-rag-architecture  # architecture decisions in section 6
-  - 260404-refactor-service-trait-multi-workspace  # trait already accepts project_root per call
+  - 260404-feat-dependency-chunking  # dep indexing increases index size, amplifies daemon value
 ---
 
-# Phase 2 — Daemon Mode
+# Daemon Mode — Per-Workspace Background Process
 
 ## Goal
 
-Add a background daemon that holds indexes in memory and serves CLI
-requests over IPC. The `DebriefService` trait already accepts
-`project_root: &Path` per method, so the daemon naturally supports
-multiple workspaces without construction-time binding.
+Add a per-workspace background daemon that holds ONNX model session and
+HNSW index in memory, eliminating 2-4 seconds of startup overhead on
+repeated CLI calls. Primary value: fast sequential queries from AI agents.
 
-## Architecture (from research)
+## Architecture
+
+**Revised from original system-wide design.** Per-workspace is sufficient
+because:
+- ONNX model is ~130MB — duplicate across 2 workspaces is negligible
+- HNSW index is per-workspace anyway (no sharing possible)
+- Multi-workspace routing (`HashMap<PathBuf, WorkspaceState>`) is
+  eliminated, significantly reducing complexity
+
+### Core decisions
 
 - **Single binary.** Daemon runs as `cargo debrief daemon`, not a
   separate executable.
+- **Per-workspace.** One daemon per project root. Binds to a single
+  workspace at spawn time.
 - **Lazy spawn.** First CLI invocation spawns the daemon if not running.
-- **Per-machine singleton.** One daemon serves all CLI invocations and
-  sessions.
-- **Idle expiry.** Daemon auto-exits after configurable idle timeout.
-- **Fallback.** CLI detects daemon availability and falls back to
-  in-process mode (`InProcessService`) if the daemon is unreachable.
-- **IPC mechanism TBD.** Candidates: Unix domain socket, named pipe,
-  HTTP on localhost.
+- **Short idle expiry (~3 min).** Purpose is eliminating delay during
+  burst usage (AI agent sessions), not long-term persistence.
+- **Fallback.** CLI falls back to in-process mode (`InProcessService`)
+  if daemon is unreachable. 2-4s startup is acceptable for fallback.
+- **IPC: temp-file-based RPC.** Avoids sandbox restrictions that affect
+  Unix sockets and named pipes. Reference: `cargo-brief` project uses
+  this pattern (inspired by rust-analyzer LSP). Request/response via
+  temp files in a known directory.
+- **Discovery.** `.git/debrief/daemon.pid` (or similar workspace-local
+  path). Per-workspace, so no global PID file needed.
+
+### What the daemon holds in memory
+
+| Resource | Cold load cost | Daemon benefit |
+|----------|---------------|----------------|
+| ONNX model session | 200-500ms | Query embedding drops to ~5ms |
+| HNSW graph | 1-3s (rebuild from vectors) | Search drops to ~1ms |
+| Deserialized index | 100-300ms | Already in memory |
+| **Total** | **~2-4s** | **~10ms per query** |
 
 ## Phases
 
@@ -38,18 +60,18 @@ _To be detailed when this ticket moves to `todo/`._
 ### Phase 2A — Daemon Process Lifecycle
 
 Daemon spawn, PID file, idle timeout, `daemon status`/`daemon stop`
-subcommands.
+subcommands. Temp-file RPC directory setup.
 
 ### Phase 2B — IPC Transport
 
-Choose and implement IPC mechanism. `DaemonClient` implements
+Implement temp-file-based RPC protocol. `DaemonClient` implements
 `DebriefService` — CLI dispatches through it when daemon is available.
 
 ### Phase 2C — Integration & Fallback
 
 Transparent daemon spawn on first CLI use. Fallback to in-process when
-daemon is unavailable. Index sharing and cache coherence across
-concurrent requests.
+daemon is unavailable. Index freshness notification (daemon detects
+git changes and re-indexes).
 
 ## Development Notes
 
@@ -61,15 +83,19 @@ timestamp, binary hash, or inode) against the current CLI binary. If they
 differ, kill the stale daemon and respawn. This prevents zombie processes
 from previous `cargo build` runs from interfering during development.
 
-This guard should be compiled out in release builds — users should not
-have their daemon killed unexpectedly.
+Compiled out in release builds.
+
+### IPC reference implementation
+
+`cargo-brief` (sibling project at `../cargo-brief/`) implements
+temp-file-based RPC for sandbox-compatible IPC. Investigate its approach
+when starting Phase 2B.
 
 ## Open Questions
 
-- IPC mechanism selection (Unix socket vs. named pipe vs. localhost HTTP)
-- Daemon discovery: PID file location (`.git/debrief/daemon.pid`?
-  XDG runtime dir?)
-- Index memory sharing: does the daemon own all indexes, or can the CLI
-  read the on-disk index directly when the daemon is down?
-- Concurrency model: single-threaded tokio, or multi-threaded for
-  parallel workspace indexing?
+- Temp-file RPC protocol details: request format, response format,
+  polling vs notification, cleanup of stale temp files
+- Index freshness in daemon: poll git HEAD on each request? Or rely on
+  client to signal staleness?
+- Concurrency: single-threaded tokio sufficient for per-workspace use?
+- MCP server mode: layer on daemon later as optional interface?

@@ -1,9 +1,13 @@
 ---
 title: "Rust chunking population improvement — additional node kinds and quality"
-parent: 260403-epic-mvp-implementation
+category: feat
+priority: medium
+parent: null
 related:
   - 260404-feat-core-indexing-pipeline  # MVP chunking baseline
   - 260403-research-rag-architecture
+  - 260404-feat-dependency-chunking  # dep indexing amplifies population gaps
+  - 260404-idea-usability-test-repos  # test results inform priority of each node kind
 ---
 
 # Rust Chunking Population Improvement
@@ -42,6 +46,8 @@ and metadata conventions as the MVP chunker.
 
 ## Priority
 
-Low — MVP chunking covers the high-value items (types, functions, impls).
-These additions improve recall for edge cases and niche queries. Revisit
-after end-to-end search is working and real query patterns emerge.
+Medium — sequenced after usability testing (A) and dependency chunking (C)
+in the post-MVP roadmap. Usability test results on ripgrep will inform
+which node kinds and quality improvements have the highest real-world
+impact. Dependency chunking amplifies population gaps because missing
+node kinds in deps reduce the value of dep indexing.

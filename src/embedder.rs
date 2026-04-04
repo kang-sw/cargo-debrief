@@ -75,8 +75,26 @@ impl Embedder {
 
         let (onnx_file, tokenizer_file) = ensure_model_files(&spec, cache_dir).await?;
 
-        let session = Session::builder()
-            .context("failed to create ONNX session builder")?
+        let mut builder = Session::builder().context("failed to create ONNX session builder")?;
+
+        // GPU-first, CPU-fallback execution providers.
+        // If the EP cannot register (missing runtime, unsupported hardware, etc.)
+        // the session silently falls back to the CPU provider.
+        #[cfg(all(target_os = "macos", feature = "gpu"))]
+        {
+            builder = builder
+                .with_execution_providers([ort::ep::CoreML::default().build()])
+                .unwrap_or_else(|e| e.recover());
+        }
+
+        #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
+        {
+            builder = builder
+                .with_execution_providers([ort::ep::CUDA::default().build()])
+                .unwrap_or_else(|e| e.recover());
+        }
+
+        let session = builder
             .commit_from_file(&onnx_file)
             .with_context(|| format!("failed to load ONNX model from {}", onnx_file.display()))?;
 

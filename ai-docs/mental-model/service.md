@@ -13,6 +13,7 @@
 - `main.rs` resolves `project_root` from `std::env::current_dir()` and passes it to every service call. Config loading has been removed from `main.rs`.
 - The trait requires all returned futures to be `Send`, enforcing that implementations must be usable in a multi-threaded tokio runtime.
 - **`search` and `overview` auto-index silently.** Both call `ensure_index_fresh` before executing. If the on-disk index is missing, stale (commit changed), or was built with a different model, a full or incremental reindex runs transparently before returning results. The `index` method (exposed as `rebuild-index` CLI) always forces a full reindex regardless of staleness.
+- **Embedding is batched in groups of 64** (`EMBED_BATCH_SIZE` in `service.rs`). A progress line is written to stderr during indexing: `indexing` followed by one `.` per completed batch, then `\ndone. N chunks, M files.` This output is unconditional stderr — it is not gated by log level and cannot be suppressed via `RUST_LOG`.
 - **`index` ignores its `path` parameter.** `InProcessService::index` always indexes the full `project_root` tree via `git ls-files`. The `path` argument is accepted to satisfy the trait but is ignored (`_path`).
 
 ## Trait Signature
@@ -58,3 +59,4 @@ pub trait DebriefService {
 - **Omitting `project_root` from a new trait method** — violates the multi-workspace contract; every operation must be workspace-addressed.
 - **Passing `path` to `InProcessService::index` and expecting scoped indexing** — the `path` parameter is ignored; the implementation always indexes `project_root` fully. A scoped path parameter on the trait is a forward-compat placeholder.
 - **Expecting `search` or `overview` to fail fast on a missing index** — they will silently trigger a full reindex (including model download) before returning. This can cause unexpected latency on first call.
+- **Capturing only stdout when testing service output** — indexing progress (`indexing....done.`) goes to stderr unconditionally. Integration tests or tools that pipe only stdout will miss it; tests that scan stderr for clean output will see it.

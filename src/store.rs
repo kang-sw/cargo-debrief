@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
 
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub struct IndexData {
@@ -116,9 +116,9 @@ mod tests {
 
         save_index(&path, &IndexData::new()).unwrap();
 
-        // Overwrite the first 4 bytes (version u32, little-endian) with version 2
+        // Overwrite the first 4 bytes (version u32, little-endian) with a wrong version
         let mut bytes = std::fs::read(&path).unwrap();
-        let bad_version: u32 = 2;
+        let bad_version: u32 = 999;
         bytes[..4].copy_from_slice(&bad_version.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
 
