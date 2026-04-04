@@ -3,7 +3,18 @@
 ## Entry Points
 
 - `src/main.rs` — CLI parse, config load, service construction, command dispatch
-- `src/lib.rs` — public module re-exports (`config`, `service`); exists so integration tests and future consumers can `use cargo_debrief::*` without depending on the binary
+- `src/lib.rs` — public module re-exports; exists so integration tests and future consumers can `use cargo_debrief::*` without depending on the binary
+
+## Modules
+
+| Module | File(s) | Role |
+|---|---|---|
+| `config` | `src/config.rs` | Path resolution, file loading, layer merge |
+| `service` | `src/service.rs` | `DebriefService` trait + `InProcessService` stub |
+| `chunk` | `src/chunk.rs` | `Chunk` data model (pure data, no logic) |
+| `chunker` | `src/chunker/mod.rs`, `src/chunker/rust.rs` | `Chunker` trait + `RustChunker` (tree-sitter AST walk) |
+| `git` | `src/git.rs` | Git file tracking via `Command` shellout |
+| `store` | `src/store.rs` | Versioned index serialization (bincode) |
 
 ## Module Contracts
 
@@ -13,7 +24,8 @@
 ## Coupling
 
 - **lib.rs is the integration-test boundary.** New modules must be declared in `lib.rs`, not inlined in `main.rs`, to be testable without spawning a subprocess.
-- **Async runtime choice is load-bearing.** The service trait uses RPITIT (`impl Future` in trait) rather than the `async-trait` crate. Changing to `async-trait` later would make the trait object-safe but require a crate dep and macro overhead. Changing to `async fn` in trait (stabilized in Rust 2024) is equivalent to RPITIT — both work; the current code uses the explicit form.
+- **Async runtime choice is load-bearing.** The service trait uses RPITIT (`impl Future` in trait) rather than the `async-trait` crate. Changing to `async-trait` later would make the trait object-safe but require a crate dep and macro overhead.
+- **`chunk` is a shared data contract.** Both `chunker` and `store` depend on `chunk::Chunk`. Adding or renaming fields in `Chunk` requires updating both and bumping `store::INDEX_VERSION`.
 
 ## Technical Debt
 

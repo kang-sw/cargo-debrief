@@ -3,6 +3,8 @@ category: epic
 priority: high
 parent: null
 plans: null
+related:
+  - 260404-refactor-service-trait-multi-workspace  # cross-cutting: multi-workspace trait shape
 ---
 
 # MVP Implementation — cargo-debrief
@@ -52,6 +54,11 @@ Research: `260403-research-rag-architecture`
 2. **DebriefService trait + InProcessService**
    - Service boundary trait (index, search, get_skeleton)
    - InProcessService stub wired to CLI
+
+> **Cross-cutting refactor (see `260404-refactor-service-trait-multi-workspace`):**
+> After Phase 1A scaffolds the trait, each method must be updated to accept
+> `project_root: &Path` explicitly. This makes the service multi-workspace-capable
+> from the start — required before Phase 1C/1D wire up the full service dispatch.
 
 ### Phase 1B — Core Indexing Pipeline
 

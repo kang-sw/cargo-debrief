@@ -3,6 +3,8 @@ category: research
 priority: high
 parent: null
 plans: null
+related:
+  - 260404-refactor-service-trait-multi-workspace  # refines the daemon/service design from section 6
 ---
 
 # RAG Architecture Research for cargo-debrief
@@ -139,6 +141,11 @@ Implementation phasing:
   exposed through the trait — they remain implementation details.
 - Transport abstraction is cheap (trait is small, in-process impl is
   trivial delegation) and eliminates refactoring cost at daemon extraction.
+- **Updated (see `260404-refactor-service-trait-multi-workspace`):**
+  Each trait method accepts `project_root: &Path` explicitly instead of
+  binding a workspace at construction time. This makes the trait
+  multi-workspace-capable by default: a single daemon instance serves N
+  workspaces by dispatching on the root path each call receives.
 
 **7. LLM-based chunk summarization — deferred**
 

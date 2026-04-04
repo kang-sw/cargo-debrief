@@ -11,11 +11,14 @@ src/
   lib.rs        — module re-exports
   config.rs     — 3-layer config resolution (local → project → global → default)
   service.rs    — DebriefService trait (async RPITIT) + InProcessService
-  chunker/      — (planned) Chunker trait + tree-sitter AST-aware chunking
+  chunk.rs      — Chunk data model (Chunk, ChunkMetadata, ChunkKind, ChunkType, Visibility)
+  chunker/      — Chunker trait + RustChunker (tree-sitter AST-aware chunking)
+    mod.rs      — Chunker trait definition
+    rust.rs     — RustChunker: two-pass AST walk, impl aggregation, dual text generation
+  git.rs        — Git file tracking (head_commit, changed_files via Command shellout)
+  store.rs      — Index serialization (IndexData, bincode + versioned header)
   embedder.rs   — (planned) ONNX Runtime embedding inference + model management
   search.rs     — (planned) vector search + metadata score boosting
-  git.rs        — (planned) git diff tracking, incremental re-indexing
-  store.rs      — (planned) index serialization (serde + bincode, versioned)
   daemon.rs     — (Phase 2) daemon mode via CLI subcommand
 ```
 
@@ -66,11 +69,15 @@ cargo run -- daemon status                           # check daemon
 ## Mental Model
 
 See `ai-docs/mental-model/` for operational knowledge:
-- `overview.md` — crate structure, async runtime, stub state
+- `overview.md` — crate structure, module map, coupling notes
 - `config.md` — 3-layer resolution, merge semantics, known limitations
 - `service.md` — DebriefService trait, RPITIT non-object-safety, dispatch options
+- `chunker.md` — two-pass design, impl aggregation, orphan impl handling
+- `store.md` — bincode serialization, version mismatch semantics
+- `git.md` — Command shellout, changed_files contract
 
 ## Session Notes
 
 - Initial project setup. Research ticket captures architecture discussion.
 - Phase 1A scaffold implemented: CLI, config, service trait.
+- Phase 1B core indexing pipeline implemented: chunk model, tree-sitter Rust chunking, git tracking, index serialization.

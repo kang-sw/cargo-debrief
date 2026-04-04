@@ -4,6 +4,8 @@ parent: 260403-epic-mvp-implementation
 related:
   - 260404-feat-cli-scaffold-config-service  # prerequisite — Config, DebriefService
   - 260403-research-rag-architecture  # architecture decisions
+  - 260404-feat-rust-chunking-population  # deferred node kinds and quality improvements
+  - 260404-refactor-service-trait-multi-workspace  # trait shape change: project_root on each method
 plans:
   phase-1: null
   phase-2: null
@@ -221,6 +223,10 @@ on `kind()`:
 | `impl_item` | Extract type name + method signatures; match to existing overview by exact name text |
 | `function_item` | Free function → function chunk with module path context |
 | `mod_item` | Recurse into inline module |
+
+> **Deferred node kinds:** `const_item`, `static_item`, `type_item`,
+> `macro_definition`, `union_item`, `extern_block` — tracked in
+> `260404-feat-rust-chunking-population`.
 
 For `impl_item` children: iterate `function_item` / `associated_type`
 nodes to extract method signatures (strip body, keep signature +
@@ -442,4 +448,42 @@ After this ticket:
 - Phase 1C adds embedding pipeline, populates `Chunk.embedding`.
 - Phase 1D wires `InProcessService::index` end-to-end:
   git tracking → chunking → (embedding) → store.
+  Note: per `260404-refactor-service-trait-multi-workspace`, the wired
+  `InProcessService::index` call will accept `project_root: &Path` rather
+  than relying on config bound at construction time.
 - Search uses `IndexData.chunks` for retrieval.
+
+### Result — Phase 1: Chunk Data Model + Chunker Trait
+
+Implemented `src/chunk.rs` with all specified types (Chunk, ChunkMetadata,
+ChunkKind, ChunkType, Visibility) and `src/chunker/mod.rs` with `Chunker`
+trait. Bincode round-trip test passes. Added `bincode = "1"` dependency.
+
+### Result — Phase 2: Tree-sitter Rust Chunking
+
+Implemented `src/chunker/rust.rs` (~930 lines). Two-pass `ChunkCollector`:
+first pass collects type definitions, impl blocks, free functions; second
+pass generates overview + function chunks with dual text and full metadata.
+
+- tree-sitter 0.26 + tree-sitter-rust 0.24 (ticket specified 0.24/0.23 —
+  updated to latest compatible pair).
+- Generic stripping in impl aggregation: `base_type_name` strips `<...>`
+  to match struct name ("Foo") with impl type ("Foo<T>"). Pragmatic
+  deviation from ticket's "no generic normalization" — without it, all
+  generic impl blocks become orphan impls.
+- `indent_block` is a no-op (method text preserves original indentation).
+- 10 unit tests including real `src/config.rs` parsing.
+
+### Result — Phase 3: Git File Tracking
+
+Implemented `src/git.rs`: `head_commit` (rev-parse HEAD) and
+`changed_files` (ls-files for full index, diff --name-status for
+incremental). Renames (R) split into delete+add. Copies (C) treated
+as add only. 4 tests against this repo.
+
+### Result — Phase 4: Index Serialization
+
+Implemented `src/store.rs`: `IndexData` with versioned bincode header
+(version u32 LE first field), `save_index` (creates parent dirs),
+`load_index` (Ok(None) for missing file or version mismatch). 4 tests
+including byte-level version patching.
