@@ -94,6 +94,7 @@ See `ai-docs/mental-model/` for operational knowledge:
 - `git.md` — Command shellout, changed_files contract
 - `embedder.md` — ModelRegistry, Embedder, ONNX inference, model download
 - `search.md` — SearchIndex, hnsw_rs ANN, metadata boosting
+- `deps.md` — cargo metadata discovery, BFS root-dep computation, DepPackageInfo contract
 
 ## Post-MVP Roadmap
 
@@ -126,3 +127,4 @@ Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunkin
 - cargo-brief output format reviewed for reference. Adopting: module context line in search output (Phase 3).
 - P1 micro-chunk merging implemented (≤5-line method inlining, module overview chunks). INDEX_VERSION 3.
 - Phase 3 UX: overview ordering by visibility (pub→pub(crate)→pub(super)→private), search results prefixed with `// in crate::module` context line.
+- Dependency Chunking Phase 1: ChunkOrigin enum on Chunk (Project | Dependency), new deps.rs module (cargo metadata + BFS root-dep discovery), INDEX_VERSION 4. GPU bug split to separate ticket.
