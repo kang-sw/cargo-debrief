@@ -5,6 +5,7 @@ related:
   - 260404-feat-cli-scaffold-config-service  # prerequisite — Config, DebriefService
   - 260403-research-rag-architecture  # architecture decisions
   - 260404-feat-rust-chunking-population  # deferred node kinds and quality improvements
+  - 260404-refactor-service-trait-multi-workspace  # trait shape change: project_root on each method
 plans:
   phase-1: null
   phase-2: null
@@ -447,6 +448,9 @@ After this ticket:
 - Phase 1C adds embedding pipeline, populates `Chunk.embedding`.
 - Phase 1D wires `InProcessService::index` end-to-end:
   git tracking → chunking → (embedding) → store.
+  Note: per `260404-refactor-service-trait-multi-workspace`, the wired
+  `InProcessService::index` call will accept `project_root: &Path` rather
+  than relying on config bound at construction time.
 - Search uses `IndexData.chunks` for retrieval.
 
 ### Result — Phase 1: Chunk Data Model + Chunker Trait
