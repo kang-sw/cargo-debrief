@@ -298,6 +298,13 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
     drop(file);
     pb.finish_with_message("done");
 
+    // A concurrent download may have already placed `dest` while we were streaming.
+    // If so, discard our tmp copy and consider the download complete.
+    if dest.exists() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Ok(());
+    }
+
     tokio::fs::rename(&tmp, dest)
         .await
         .with_context(|| format!("failed to rename {} to {}", tmp.display(), dest.display()))?;
