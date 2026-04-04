@@ -117,6 +117,13 @@ chunker stage where submodule-as-dependency is the primary pattern.
 Current `git ls-files` does not recurse into submodules, so they are
 already excluded from project indexing.
 
+## Pre-requisite: GPU acceleration
+
+Before dependency indexing increases embedding volume, add GPU-first
+execution provider to `Embedder::load` (CoreML on macOS, CUDA on
+Linux/Windows, CPU fallback). Feature-flag gated (`gpu`, `cuda`).
+Small scope — session builder config change only.
+
 ## Phases
 
 ### Phase 1 — Chunk model + dependency discovery
