@@ -288,9 +288,13 @@ fn ipc_loop(
 pub fn check_binary_identity(daemon_dir: &Path) -> bool {
     let marker_path = daemon_dir.join("daemon.exe_mtime");
 
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return true, // can't check, assume ok
+    // Use CARGO_DEBRIEF_BIN if set (testing), otherwise current_exe().
+    let current_exe = match std::env::var("CARGO_DEBRIEF_BIN") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return true, // can't check, assume ok
+        },
     };
     let current_mtime = match fs::metadata(&current_exe).and_then(|m| m.modified()) {
         Ok(t) => t
@@ -329,6 +333,156 @@ fn write_binary_marker(daemon_dir: &Path) {
                 fs::write(&marker_path, nanos).ok();
             }
         }
+    }
+}
+
+/// Clean up a stale daemon: dead PID with leftover files (R4).
+/// Returns true if stale daemon was cleaned up, false if daemon is alive or no PID.
+pub fn cleanup_stale(daemon_dir: &Path) -> bool {
+    if let Some(pid) = read_pid(daemon_dir) {
+        if !ipc::process_alive(pid) {
+            eprintln!("[daemon] cleaning up stale daemon (PID {pid})");
+            cleanup(daemon_dir);
+            return true;
+        }
+    }
+    false
+}
+
+/// Spawn a new daemon process via re-exec of `__daemon`.
+/// The caller should hold the PID flock to serialize concurrent spawns.
+///
+/// Uses `CARGO_DEBRIEF_BIN` env var if set (for testing), otherwise `current_exe()`.
+pub fn spawn_daemon(project_root: &Path) -> Result<std::process::Child> {
+    let dir = daemon_dir(project_root)?;
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create daemon dir: {}", dir.display()))?;
+
+    let exe = match std::env::var("CARGO_DEBRIEF_BIN") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => std::env::current_exe().context("failed to get current executable")?,
+    };
+    let root_str = project_root
+        .to_str()
+        .context("non-UTF8 project root path")?;
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["__daemon", "--project-root", root_str])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    ipc::configure_daemon_spawn(&mut cmd);
+
+    let child = cmd.spawn().context("failed to spawn daemon process")?;
+    Ok(child)
+}
+
+/// Wait for the daemon readiness indicator to appear.
+/// Prints progress dots to stderr. Returns true if ready, false on timeout.
+pub fn wait_for_readiness(daemon_dir: &Path, timeout: Duration) -> bool {
+    use std::io::Write as _;
+    let ready = ipc::ready_indicator(daemon_dir);
+    let start = Instant::now();
+
+    while start.elapsed() < timeout {
+        if ready.exists() {
+            return true;
+        }
+        eprint!(".");
+        let _ = std::io::stderr().flush();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Attempt to auto-spawn a daemon and connect to it.
+///
+/// Flow:
+/// 1. Compute daemon dir
+/// 2. Check if already running → connect (with binary guard R9)
+/// 3. flock PID to serialize spawns (R1)
+/// 4. Inside flock: clean stale (R4), re-check, spawn if needed
+/// 5. Wait readiness → connect
+/// 6. Any failure → return None (caller falls back to InProcess)
+pub fn auto_spawn_and_connect(project_root: &Path) -> Option<crate::service::DaemonClient> {
+    let dir = daemon_dir(project_root).ok()?;
+
+    // Fast path: daemon already running
+    if is_daemon_running(&dir) {
+        // R9: debug binary guard
+        if !check_binary_identity(&dir) {
+            eprintln!("[daemon] binary mismatch, killing stale daemon");
+            kill_stale_daemon(&dir);
+        } else {
+            return crate::service::DaemonClient::connect(project_root);
+        }
+    }
+
+    // Acquire flock on PID to serialize spawn attempts (R1).
+    fs::create_dir_all(&dir).ok()?;
+    let pid_path = dir.join("daemon.pid");
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&pid_path)
+        .ok()?;
+
+    let flock_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match ipc::try_flock_exclusive(&lock_file) {
+            Ok(true) => break,
+            Ok(false) => {
+                if Instant::now() >= flock_deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+
+    // R4: clean stale daemon inside flock (prevents TOCTOU with concurrent spawners).
+    cleanup_stale(&dir);
+
+    // Re-check after acquiring flock — another process may have spawned (R1).
+    if is_daemon_running(&dir) {
+        drop(lock_file);
+        return crate::service::DaemonClient::connect(project_root);
+    }
+
+    // Spawn daemon
+    use std::io::Write as _;
+    eprint!("spawning daemon");
+    let _ = std::io::stderr().flush();
+
+    let child = match spawn_daemon(project_root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed.\n[daemon] spawn error: {e}");
+            return None;
+        }
+    };
+
+    // Release flock before waiting. A redundant concurrent spawner could also start
+    // a daemon here, but the second daemon will self-bail in write_pid_file() when
+    // it fails to acquire its own flock on the PID file (I2 accepted limitation).
+    drop(lock_file);
+
+    // Wait for readiness
+    if wait_for_readiness(&dir, Duration::from_secs(30)) {
+        eprintln!("done.");
+        let mut child = child;
+        if let Ok(Some(status)) = child.try_wait() {
+            eprintln!("[daemon] daemon exited during startup: {status}");
+            return None;
+        }
+        crate::service::DaemonClient::connect(project_root)
+    } else {
+        eprintln!("failed.");
+        None
     }
 }
 
