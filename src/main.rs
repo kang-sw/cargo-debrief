@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use cargo_debrief::service::{DebriefService, InProcessService};
+use cargo_debrief::{
+    chunk::ChunkOrigin,
+    service::{DebriefService, InProcessService},
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -23,11 +26,17 @@ enum Command {
         /// Number of results to return
         #[arg(long, default_value_t = 10)]
         top_k: usize,
+        /// Exclude dependency chunks from search results
+        #[arg(long)]
+        no_deps: bool,
     },
     /// Show file-level overview (declarations and signatures only)
     Overview {
-        /// Source file path
-        file: PathBuf,
+        /// Source file path (mutually exclusive with --dep)
+        file: Option<PathBuf>,
+        /// Show overview of a dependency crate by name
+        #[arg(long)]
+        dep: Option<String>,
     },
     /// Configure the embedding model
     SetEmbeddingModel {
@@ -54,13 +63,26 @@ async fn main() -> Result<()> {
                 result.files_indexed, result.chunks_created
             );
         }
-        Command::Search { query, top_k } => {
-            let results = service.search(&project_root, &query, top_k).await?;
+        Command::Search {
+            query,
+            top_k,
+            no_deps,
+        } => {
+            let results = service
+                .search(&project_root, &query, top_k, !no_deps)
+                .await?;
             for (i, r) in results.iter().enumerate() {
+                let dep_label = match &r.origin {
+                    ChunkOrigin::Dependency { crate_name, .. } => {
+                        format!(" [dep: {crate_name}]")
+                    }
+                    ChunkOrigin::Project => String::new(),
+                };
                 println!(
-                    "#{} [score: {:.4}] {}:{}-{}",
+                    "#{} [score: {:.4}]{} {}:{}-{}",
                     i + 1,
                     r.score,
+                    dep_label,
                     r.file_path,
                     r.line_range.0,
                     r.line_range.1,
@@ -72,10 +94,17 @@ async fn main() -> Result<()> {
                 println!();
             }
         }
-        Command::Overview { file } => {
-            let skeleton = service.overview(&project_root, &file).await?;
-            println!("{skeleton}");
-        }
+        Command::Overview { file, dep } => match (file, dep) {
+            (Some(f), None) => {
+                let skeleton = service.overview(&project_root, &f).await?;
+                println!("{skeleton}");
+            }
+            (None, Some(crate_name)) => {
+                let skeleton = service.dep_overview(&project_root, &crate_name).await?;
+                println!("{skeleton}");
+            }
+            _ => anyhow::bail!("provide exactly one of a file path or --dep <crate-name>"),
+        },
         Command::SetEmbeddingModel { model, global } => {
             service
                 .set_embedding_model(&project_root, &model, global)
