@@ -15,11 +15,7 @@ struct Cli {
 enum Command {
     /// Perform a manual full re-index of the codebase (normally implicit)
     #[command(name = "rebuild-index")]
-    RebuildIndex {
-        /// Path to index (defaults to current directory)
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
+    RebuildIndex,
     /// Search indexed code chunks
     Search {
         /// Search query
@@ -51,8 +47,8 @@ async fn main() -> Result<()> {
     let service = InProcessService::new();
 
     match cli.command {
-        Command::RebuildIndex { path } => {
-            let result = service.index(&project_root, &path).await?;
+        Command::RebuildIndex => {
+            let result = service.index(&project_root, &project_root).await?;
             println!(
                 "Indexed {} files, {} chunks created.",
                 result.files_indexed, result.chunks_created

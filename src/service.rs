@@ -139,7 +139,7 @@ async fn ensure_index_fresh(project_root: &Path) -> Result<IndexData> {
         Some(ref data) if data.embedding_model.as_deref() != Some(model_name) => (None, None),
         Some(ref data) if data.last_indexed_commit.as_deref() != Some(head.as_str()) => {
             let prior = data.last_indexed_commit.clone();
-            (prior.map(|s| s), Some(existing.unwrap()))
+            (prior, Some(existing.unwrap()))
         }
         Some(data) => return Ok(data),
     };
@@ -212,15 +212,20 @@ async fn run_index(
     };
 
     // Assign embeddings back to chunks by position and insert into the index.
+    assert_eq!(
+        embeddings.len(),
+        all_embedding_texts.len(),
+        "embed_batch returned {} vectors, expected {}",
+        embeddings.len(),
+        all_embedding_texts.len()
+    );
     let mut emb_idx = 0usize;
     let mut chunks_created = 0usize;
 
     for (rel_path, mut chunks) in per_file_chunks {
         for chunk in &mut chunks {
-            if emb_idx < embeddings.len() {
-                chunk.embedding = Some(embeddings[emb_idx].clone());
-                emb_idx += 1;
-            }
+            chunk.embedding = Some(embeddings[emb_idx].clone());
+            emb_idx += 1;
         }
         chunks_created += chunks.len();
         base_index.chunks.insert(PathBuf::from(&rel_path), chunks);
@@ -349,7 +354,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn in_process_service_stubs_return_errors() {
+    async fn set_embedding_model_rejects_unknown_model() {
         let service = InProcessService::new();
         let root = Path::new(".");
 
