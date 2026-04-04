@@ -1,6 +1,11 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+
+use crate::{
+    config::{config_paths, save_config},
+    embedder::ModelRegistry,
+};
 
 /// Result of an indexing operation.
 #[derive(Debug)]
@@ -109,10 +114,32 @@ impl DebriefService for InProcessService {
         model: &str,
         global: bool,
     ) -> Result<()> {
-        anyhow::bail!(
-            "not yet implemented: set-embedding-model {model:?} (global={global}, root: {})",
-            project_root.display()
-        )
+        ModelRegistry::lookup(model).with_context(|| {
+            format!(
+                "unknown embedding model: {model:?}. Use a known model name such as {:?}",
+                ModelRegistry::DEFAULT_MODEL
+            )
+        })?;
+
+        let paths = config_paths(project_root);
+
+        if global {
+            let target = paths
+                .global
+                .context("could not determine global config path (no home directory?)")?;
+            let mut config = crate::config::load_layer_single(&target)?.unwrap_or_default();
+            config.embedding_model = Some(model.to_string());
+            save_config(&target, &config)?;
+        } else {
+            let target = paths
+                .project
+                .context("not inside a git repository; cannot write project config")?;
+            let mut config = crate::config::load_layer_single(&target)?.unwrap_or_default();
+            config.embedding_model = Some(model.to_string());
+            save_config(&target, &config)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -138,10 +165,48 @@ mod tests {
         assert!(err.to_string().contains("not yet implemented"));
 
         let err = service
-            .set_embedding_model(root, "test", false)
+            .set_embedding_model(root, "not-a-real-model", false)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("not yet implemented"));
+        assert!(
+            err.to_string().contains("unknown embedding model"),
+            "expected unknown model error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_embedding_model_project_scope() -> anyhow::Result<()> {
+        use std::process::Command;
+        use tempfile::tempdir;
+
+        let dir = tempdir()?;
+        // Initialize a git repo so config_paths can find a project path.
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()?;
+
+        let service = InProcessService::new();
+        service
+            .set_embedding_model(dir.path(), "nomic-embed-code", false)
+            .await?;
+
+        let config_path = dir.path().join(".debrief").join("config.toml");
+        assert!(config_path.exists(), "project config should be created");
+
+        let paths = crate::config::ConfigPaths {
+            global: None,
+            project: Some(config_path),
+            local: None,
+        };
+        let config = crate::config::load_config(&paths)?;
+        assert_eq!(
+            config.embedding_model.as_deref(),
+            Some("nomic-embed-code"),
+            "embedding model should be written to project config"
+        );
+
+        Ok(())
     }
 
     #[tokio::test]
