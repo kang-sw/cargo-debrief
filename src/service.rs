@@ -188,7 +188,7 @@ mod tests {
 
         let service = InProcessService::new();
         service
-            .set_embedding_model(dir.path(), "nomic-embed-code", false)
+            .set_embedding_model(dir.path(), "nomic-embed-text-v1.5", false)
             .await?;
 
         let config_path = dir.path().join(".debrief").join("config.toml");
@@ -202,7 +202,7 @@ mod tests {
         let config = crate::config::load_config(&paths)?;
         assert_eq!(
             config.embedding_model.as_deref(),
-            Some("nomic-embed-code"),
+            Some("nomic-embed-text-v1.5"),
             "embedding model should be written to project config"
         );
 

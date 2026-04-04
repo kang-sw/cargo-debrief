@@ -78,7 +78,11 @@ impl SearchIndex {
         }
 
         let hnsw = self.hnsw.as_ref().unwrap();
-        let neighbors = hnsw.search(query_vec, top_k, HNSW_EF_SEARCH);
+        // Fetch more candidates than top_k so that metadata boosting can surface
+        // chunks that ranked just outside top_k by raw similarity. Cap at the
+        // number of indexed chunks to avoid over-requesting from hnsw_rs.
+        let candidates = ((top_k * 2).max(top_k + 20)).min(self.chunks.len());
+        let neighbors = hnsw.search(query_vec, candidates, HNSW_EF_SEARCH);
 
         let mut results: Vec<SearchResult> = neighbors
             .iter()
