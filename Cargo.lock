@@ -174,15 +174,18 @@ dependencies = [
  "futures-util",
  "hnsw_rs",
  "indicatif",
+ "libc",
  "ort",
  "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
  "tokenizers",
  "tokio",
  "toml",
  "tree-sitter",
  "tree-sitter-rust",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
