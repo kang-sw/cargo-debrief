@@ -13,7 +13,7 @@ pub struct ModelRegistry;
 
 impl ModelRegistry {
     /// Name of the default model used when config has no `embedding_model`.
-    pub const DEFAULT_MODEL: &'static str = "nomic-embed-code";
+    pub const DEFAULT_MODEL: &'static str = "nomic-embed-text-v1.5";
 
     /// Resolve a user-supplied model name to a `ModelSpec`.
     /// Returns `None` for unknown names.
@@ -25,7 +25,7 @@ impl ModelRegistry {
 /// Download coordinates for a model.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelSpec {
-    /// Short user-facing name (e.g. "nomic-embed-code").
+    /// Short user-facing name (e.g. "nomic-embed-text-v1.5").
     pub name: &'static str,
     /// HuggingFace repo ID (e.g. "nomic-ai/nomic-embed-text-v1.5").
     pub hf_repo: &'static str,
@@ -41,7 +41,7 @@ pub struct ModelSpec {
 
 static KNOWN_MODELS: &[ModelSpec] = &[
     ModelSpec {
-        name: "nomic-embed-code",
+        name: "nomic-embed-text-v1.5",
         hf_repo: "nomic-ai/nomic-embed-text-v1.5",
         onnx_path: "onnx/model.onnx",
         tokenizer_path: "tokenizer.json",
@@ -253,7 +253,12 @@ async fn ensure_model_files(spec: &ModelSpec, cache_dir: &Path) -> Result<(PathB
 }
 
 /// Download a URL to `dest`, writing to `dest.tmp` first then renaming atomically.
+/// Streams the response body in chunks so large model files (~130 MB) are never
+/// fully buffered in memory.
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
     let tmp = dest.with_extension("tmp");
 
     let response = reqwest::get(url)
@@ -276,16 +281,21 @@ async fn download_file(url: &str, dest: &Path) -> Result<()> {
         dest.file_name().unwrap_or_default().to_string_lossy()
     ));
 
-    let bytes = response
-        .bytes()
+    let mut file = tokio::fs::File::create(&tmp)
         .await
-        .context("failed to read response body")?;
-    pb.inc(bytes.len() as u64);
+        .with_context(|| format!("failed to create {}", tmp.display()))?;
 
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("stream error during download")?;
+        pb.inc(chunk.len() as u64);
+        file.write_all(&chunk)
+            .await
+            .context("write error during download")?;
+    }
 
+    file.flush().await.context("flush failed")?;
+    drop(file);
     pb.finish_with_message("done");
 
     tokio::fs::rename(&tmp, dest)
@@ -301,10 +311,13 @@ mod tests {
 
     #[test]
     fn model_registry_lookup_known() {
-        let spec = ModelRegistry::lookup("nomic-embed-code");
-        assert!(spec.is_some(), "nomic-embed-code should be in registry");
+        let spec = ModelRegistry::lookup("nomic-embed-text-v1.5");
+        assert!(
+            spec.is_some(),
+            "nomic-embed-text-v1.5 should be in registry"
+        );
         let spec = spec.unwrap();
-        assert_eq!(spec.name, "nomic-embed-code");
+        assert_eq!(spec.name, "nomic-embed-text-v1.5");
         assert_eq!(spec.hf_repo, "nomic-ai/nomic-embed-text-v1.5");
         assert_eq!(spec.onnx_path, "onnx/model.onnx");
         assert_eq!(spec.tokenizer_path, "tokenizer.json");
