@@ -28,6 +28,7 @@ pub struct SearchResult {
     pub score: f64,
     pub display_text: String,
     pub module_path: String,
+    pub origin: ChunkOrigin,
 }
 
 /// Service boundary between CLI and core logic.
@@ -53,12 +54,19 @@ pub trait DebriefService {
         project_root: &Path,
         query: &str,
         top_k: usize,
+        include_deps: bool,
     ) -> impl Future<Output = Result<Vec<SearchResult>>> + Send;
 
     fn overview(
         &self,
         project_root: &Path,
         file: &Path,
+    ) -> impl Future<Output = Result<String>> + Send;
+
+    fn dep_overview(
+        &self,
+        project_root: &Path,
+        crate_name: &str,
     ) -> impl Future<Output = Result<String>> + Send;
 
     fn set_embedding_model(
@@ -348,8 +356,21 @@ fn build_dep_embedding_text(
 /// `RustChunker`, retains only `pub` items, annotates embedding text, and
 /// embeds in batches.
 async fn run_deps_index(project_root: &Path, embedder: &Embedder) -> Result<DepsIndexData> {
-    let packages = deps::discover_dependency_packages(project_root)?;
+    let config = load_config(&config_paths(project_root))?;
+    let mut packages = deps::discover_dependency_packages(project_root)?;
     let lock_hash = cargo_lock_content_hash(project_root).ok();
+
+    // Apply exclude list from config before chunking.
+    let exclude: std::collections::HashSet<&str> = config
+        .dependencies
+        .as_ref()
+        .and_then(|d| d.exclude.as_ref())
+        .map(|v| v.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    if !exclude.is_empty() {
+        packages.retain(|p| !exclude.contains(p.crate_name.as_str()));
+    }
 
     let chunker = RustChunker;
     let mut all_chunks: Vec<Chunk> = Vec::new();
@@ -477,6 +498,7 @@ impl DebriefService for InProcessService {
         project_root: &Path,
         query: &str,
         top_k: usize,
+        include_deps: bool,
     ) -> Result<Vec<SearchResult>> {
         let config = load_config(&config_paths(project_root))?;
         let model_name = config
@@ -486,13 +508,19 @@ impl DebriefService for InProcessService {
         let embedder = make_embedder(model_name).await?;
 
         let index_data = ensure_index_fresh(project_root, &embedder).await?;
-        let _deps_data = ensure_deps_index_fresh(project_root, &embedder).await?;
 
-        let flat_chunks: Vec<(PathBuf, Chunk)> = index_data
+        let mut flat_chunks: Vec<(PathBuf, Chunk)> = index_data
             .chunks
             .into_iter()
             .flat_map(|(path, chunks)| chunks.into_iter().map(move |c| (path.clone(), c)))
             .collect();
+
+        if include_deps {
+            let deps_data = ensure_deps_index_fresh(project_root, &embedder).await?;
+            for chunk in deps_data.chunks {
+                flat_chunks.push((PathBuf::from(&chunk.metadata.file_path), chunk));
+            }
+        }
 
         let search_index = SearchIndex::build(flat_chunks)?;
         search_index.search(query, &embedder, top_k)
@@ -545,6 +573,38 @@ impl DebriefService for InProcessService {
             anyhow::bail!("no overview chunks found for {}", file.display());
         }
         Ok(overview_text)
+    }
+
+    async fn dep_overview(&self, project_root: &Path, crate_name: &str) -> Result<String> {
+        let dep_index_path = deps_index_path(project_root)?;
+        let data = store::load_deps_index(&dep_index_path)?
+            .ok_or_else(|| anyhow::anyhow!("no dependency index; run `rebuild-index` first"))?;
+
+        let mut overview_chunks: Vec<&Chunk> = data
+            .chunks
+            .iter()
+            .filter(|c| {
+                matches!(&c.origin, ChunkOrigin::Dependency { crate_name: cn, .. } if cn == crate_name)
+            })
+            .filter(|c| c.metadata.chunk_type == ChunkType::Overview)
+            .collect();
+
+        if overview_chunks.is_empty() {
+            anyhow::bail!("no overview chunks found for dependency {crate_name:?}");
+        }
+
+        overview_chunks.sort_by_key(|c| match c.metadata.visibility {
+            Visibility::Pub => 0,
+            Visibility::PubCrate => 1,
+            Visibility::PubSuper => 2,
+            Visibility::Private => 3,
+        });
+
+        Ok(overview_chunks
+            .iter()
+            .map(|c| c.display_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"))
     }
 
     async fn set_embedding_model(
@@ -736,5 +796,26 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_dep_overview_empty_index_returns_error() {
+        use std::process::Command;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let service = InProcessService::new();
+        let err = service.dep_overview(dir.path(), "serde").await.unwrap_err();
+        assert!(
+            err.to_string().contains("no dependency index")
+                || err.to_string().contains("no overview chunks"),
+            "expected dep index missing error, got: {err}"
+        );
     }
 }
