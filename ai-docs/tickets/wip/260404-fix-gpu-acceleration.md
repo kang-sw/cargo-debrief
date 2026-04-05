@@ -5,7 +5,7 @@ priority: high
 started: 2026-04-05
 parent: null
 plans:
-  phase-2: null
+  phase-2: 2026-04/05-1400.candle-migration
 related:
   - 260404-feat-dependency-chunking  # GPU speeds up dep indexing; volume increase amplifies value
 ---
