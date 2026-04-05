@@ -14,7 +14,9 @@ libc = "0.2"
 serde_json = "1"
 futures-util = "0.3"
 indicatif = "0.17"
-ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+candle-core = { version = "0.10" }
+candle-nn = { version = "0.10" }
+candle-transformers = { version = "0.10" }
 reqwest = { version = "0.12", features = ["stream"] }
 serde = { version = "1", features = ["derive"] }
 tokenizers = "0.19"
@@ -30,5 +32,5 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 tempfile = "3"
 
 [features]
-gpu = ["ort/coreml"]
-cuda = ["ort/cuda"]
+metal = ["candle-core/metal"]
+cuda = ["candle-core/cuda"]

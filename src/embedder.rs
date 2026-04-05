@@ -7,8 +7,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use candle_core::{DType, Device, Tensor};
+use candle_nn::VarBuilder;
+use candle_transformers::models::{
+    bert::{BertModel, Config as BertConfig},
+    nomic_bert::{Config as NomicBertConfig, NomicBertModel, l2_normalize, mean_pooling},
+};
 use indicatif::{ProgressBar, ProgressStyle};
-use ort::{session::Session, value::Tensor};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
 
 /// Prints current RSS (from `ps`) to stderr for memory profiling.
@@ -29,7 +34,7 @@ fn log_rss(label: &str) {
     }
 }
 
-/// Counts how many times `embed_batch` has called `session.run`; used to
+/// Counts how many times `embed_batch` has called model inference; used to
 /// limit RSS logging to the first 3 calls.
 static EMBED_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -47,6 +52,13 @@ impl ModelRegistry {
     }
 }
 
+/// Discriminates which candle model architecture to load and run.
+#[derive(Debug, Clone, Copy)]
+pub enum ModelKind {
+    NomicBert,
+    Bert,
+}
+
 /// Download coordinates for a model.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelSpec {
@@ -54,41 +66,55 @@ pub struct ModelSpec {
     pub name: &'static str,
     /// HuggingFace repo ID (e.g. "nomic-ai/nomic-embed-text-v1.5").
     pub hf_repo: &'static str,
-    /// Path within the repo to the ONNX model file.
-    pub onnx_path: &'static str,
+    /// Path within the repo to the safetensors weights file.
+    pub weights_path: &'static str,
+    /// Path within the repo to the model config.json file.
+    pub config_path: &'static str,
     /// Path within the repo to the tokenizer file.
     pub tokenizer_path: &'static str,
     /// Sequence length cap for tokenization.
     pub max_length: usize,
     /// Output embedding dimension.
     pub embedding_dim: usize,
+    /// Model architecture for dispatch.
+    pub model_kind: ModelKind,
 }
 
 static KNOWN_MODELS: &[ModelSpec] = &[
     ModelSpec {
         name: "nomic-embed-text-v1.5",
         hf_repo: "nomic-ai/nomic-embed-text-v1.5",
-        onnx_path: "onnx/model.onnx",
+        weights_path: "model.safetensors",
+        config_path: "config.json",
         tokenizer_path: "tokenizer.json",
         max_length: 512,
         embedding_dim: 768,
+        model_kind: ModelKind::NomicBert,
     },
     ModelSpec {
         name: "bge-large-en-v1.5",
         hf_repo: "BAAI/bge-large-en-v1.5",
-        onnx_path: "onnx/model.onnx",
+        weights_path: "model.safetensors",
+        config_path: "config.json",
         tokenizer_path: "tokenizer.json",
         max_length: 512,
         embedding_dim: 1024,
+        model_kind: ModelKind::Bert,
     },
 ];
 
+/// Candle model variants — dispatched at runtime based on `ModelKind`.
+enum EmbedderModel {
+    NomicBert(NomicBertModel),
+    Bert(BertModel),
+}
+
 /// Loaded embedder ready for inference.
 pub struct Embedder {
-    session: Mutex<Session>,
+    model: Mutex<EmbedderModel>,
     tokenizer: Tokenizer,
     max_length: usize,
-    has_token_type_ids: bool,
+    device: Device,
 }
 
 impl Embedder {
@@ -98,40 +124,49 @@ impl Embedder {
         let spec = ModelRegistry::lookup(model_name)
             .with_context(|| format!("unknown model: {model_name}"))?;
 
-        let (onnx_file, tokenizer_file) = ensure_model_files(&spec, cache_dir).await?;
+        let (weights_file, config_file, tokenizer_file) =
+            ensure_model_files(&spec, cache_dir).await?;
 
-        log_rss("before session builder");
-        let mut builder = Session::builder().context("failed to create ONNX session builder")?;
-        log_rss("after session builder");
+        // Device selection: Metal > CUDA > CPU, each feature-gated.
+        #[cfg(feature = "metal")]
+        let device = Device::new_metal(0).unwrap_or(Device::Cpu);
 
-        // GPU-first, CPU-fallback execution providers.
-        // If the EP cannot register (missing runtime, unsupported hardware, etc.)
-        // the session silently falls back to the CPU provider.
-        #[cfg(all(target_os = "macos", feature = "gpu"))]
-        {
-            builder = builder
-                .with_execution_providers([ort::ep::CoreML::default().build()])
-                .unwrap_or_else(|e| e.recover());
-            log_rss("after EP registration");
-        }
+        #[cfg(all(not(feature = "metal"), feature = "cuda"))]
+        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
 
-        #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
-        {
-            builder = builder
-                .with_execution_providers([ort::ep::CUDA::default().build()])
-                .unwrap_or_else(|e| e.recover());
-            log_rss("after EP registration");
-        }
+        #[cfg(not(any(feature = "metal", feature = "cuda")))]
+        let device = Device::Cpu;
 
-        let session = builder
-            .commit_from_file(&onnx_file)
-            .with_context(|| format!("failed to load ONNX model from {}", onnx_file.display()))?;
-        log_rss("after commit_from_file (model loaded)");
+        log_rss("before VarBuilder");
 
-        let has_token_type_ids = session
-            .inputs()
-            .iter()
-            .any(|outlet: &ort::value::Outlet| outlet.name() == "token_type_ids");
+        // Memory-map the safetensors weights file. unsafe is required by candle API.
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[&weights_file], DType::F32, &device)
+                .context("failed to load model weights")?
+        };
+
+        log_rss("after VarBuilder");
+
+        let config_str = std::fs::read_to_string(&config_file)
+            .with_context(|| format!("failed to read config {}", config_file.display()))?;
+
+        let model = match spec.model_kind {
+            ModelKind::NomicBert => {
+                let config: NomicBertConfig = serde_json::from_str(&config_str)
+                    .context("failed to parse NomicBert config")?;
+                let m =
+                    NomicBertModel::load(vb, &config).context("failed to build NomicBertModel")?;
+                EmbedderModel::NomicBert(m)
+            }
+            ModelKind::Bert => {
+                let config: BertConfig =
+                    serde_json::from_str(&config_str).context("failed to parse Bert config")?;
+                let m = BertModel::load(vb, &config).context("failed to build BertModel")?;
+                EmbedderModel::Bert(m)
+            }
+        };
+
+        log_rss("after model construction");
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_file)
             .map_err(|e| anyhow::anyhow!("failed to load tokenizer: {e}"))?;
@@ -150,10 +185,10 @@ impl Embedder {
         }));
 
         Ok(Self {
-            session: Mutex::new(session),
+            model: Mutex::new(model),
             tokenizer,
             max_length: spec.max_length,
-            has_token_type_ids,
+            device,
         })
     }
 
@@ -177,95 +212,52 @@ impl Embedder {
             .unwrap_or(0)
             .min(self.max_length);
 
-        let mut ids_data = vec![0i64; batch_size * seq_len];
-        let mut mask_data = vec![0i64; batch_size * seq_len];
+        // candle embedding layers expect u32 token indices (not i64).
+        let mut ids_data = vec![0u32; batch_size * seq_len];
+        let mut mask_data = vec![0u32; batch_size * seq_len];
 
         for (b, enc) in encodings.iter().enumerate() {
             let ids = enc.get_ids();
             let mask = enc.get_attention_mask();
             let len = ids.len().min(seq_len);
             for s in 0..len {
-                ids_data[b * seq_len + s] = ids[s] as i64;
-                mask_data[b * seq_len + s] = mask[s] as i64;
+                ids_data[b * seq_len + s] = ids[s];
+                mask_data[b * seq_len + s] = mask[s];
             }
         }
 
-        let shape = vec![batch_size, seq_len];
-        let ids_tensor = Tensor::<i64>::from_array((shape.as_slice(), ids_data))
-            .context("failed to create ids tensor")?;
-        let mask_tensor = Tensor::<i64>::from_array((shape.as_slice(), mask_data.clone()))
-            .context("failed to create mask tensor")?;
+        let input_ids = Tensor::from_slice(&ids_data, (batch_size, seq_len), &self.device)
+            .context("failed to create input_ids tensor")?;
+        let attention_mask = Tensor::from_slice(&mask_data, (batch_size, seq_len), &self.device)
+            .context("failed to create attention_mask tensor")?;
 
-        // Run inference and extract hidden state as owned data before releasing the session lock.
-        let (out_seq_len, hidden_dim, hidden_owned): (usize, usize, Vec<f32>) = {
-            let mut session = self.session.lock().unwrap();
+        let hidden_states = {
+            let model = self.model.lock().unwrap();
             let call_index = EMBED_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
             let should_log_rss = call_index < 3;
             if should_log_rss {
-                log_rss("before session.run");
+                log_rss("before model.forward");
             }
-            let outputs = if self.has_token_type_ids {
-                let type_ids_data = vec![0i64; batch_size * seq_len];
-                let type_ids_tensor = Tensor::<i64>::from_array((shape.as_slice(), type_ids_data))
-                    .context("failed to create type_ids tensor")?;
-                session
-                    .run(ort::inputs! {
-                        "input_ids" => ids_tensor,
-                        "attention_mask" => mask_tensor,
-                        "token_type_ids" => type_ids_tensor,
-                    })
-                    .context("ONNX inference failed")?
-            } else {
-                session
-                    .run(ort::inputs! {
-                        "input_ids" => ids_tensor,
-                        "attention_mask" => mask_tensor,
-                    })
-                    .context("ONNX inference failed")?
+            let result = match &*model {
+                EmbedderModel::NomicBert(m) => {
+                    m.forward(&input_ids, None, Some(&attention_mask))?
+                }
+                EmbedderModel::Bert(m) => {
+                    let zeros = Tensor::zeros_like(&input_ids)?;
+                    m.forward(&input_ids, &zeros, Some(&attention_mask))?
+                }
             };
             if should_log_rss {
-                log_rss("after session.run");
+                log_rss("after model.forward");
             }
-
-            let (out_shape, hidden_data) = outputs["last_hidden_state"]
-                .try_extract_tensor::<f32>()
-                .context("failed to extract last_hidden_state")?;
-
-            // shape: [batch_size, out_seq_len, hidden_dim]
-            let s = out_shape[1] as usize;
-            let d = out_shape[2] as usize;
-            (s, d, hidden_data.to_vec())
+            result
         };
 
-        let mut embeddings = Vec::with_capacity(batch_size);
-        for b in 0..batch_size {
-            let mut pooled = vec![0.0f32; hidden_dim];
-            let mut mask_sum = 0.0f32;
-
-            for s in 0..out_seq_len {
-                let m = mask_data[b * seq_len + s.min(seq_len - 1)] as f32;
-                mask_sum += m;
-                for d in 0..hidden_dim {
-                    pooled[d] +=
-                        hidden_owned[b * out_seq_len * hidden_dim + s * hidden_dim + d] * m;
-                }
-            }
-
-            if mask_sum > 0.0 {
-                for v in &mut pooled {
-                    *v /= mask_sum;
-                }
-            }
-
-            let norm: f32 = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
-            if norm > 0.0 {
-                for v in &mut pooled {
-                    *v /= norm;
-                }
-            }
-
-            embeddings.push(pooled);
-        }
+        // mean_pooling and l2_normalize are free functions from the nomic_bert module;
+        // they operate on generic Tensors so they work for both NomicBert and Bert outputs.
+        let pooled = mean_pooling(&hidden_states, &attention_mask)?;
+        let normalized = l2_normalize(&pooled)?;
+        let embeddings: Vec<Vec<f32>> = normalized.to_vec2::<f32>()?;
 
         Ok(embeddings)
     }
@@ -279,23 +271,34 @@ impl Embedder {
     }
 }
 
-/// Download model files if missing, returning `(onnx_path, tokenizer_path)`.
+/// Download model files if missing, returning `(weights_path, config_path, tokenizer_path)`.
 /// Partial downloads are written to `*.tmp` and renamed atomically on completion.
-async fn ensure_model_files(spec: &ModelSpec, cache_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+async fn ensure_model_files(
+    spec: &ModelSpec,
+    cache_dir: &Path,
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let model_dir = cache_dir.join(spec.name);
     std::fs::create_dir_all(&model_dir)
         .with_context(|| format!("failed to create model cache dir {}", model_dir.display()))?;
 
-    let onnx_dest = model_dir.join("model.onnx");
+    let weights_dest = model_dir.join("model.safetensors");
+    let config_dest = model_dir.join("config.json");
     let tokenizer_dest = model_dir.join("tokenizer.json");
 
     let base_url = format!("https://huggingface.co/{}/resolve/main", spec.hf_repo);
 
-    if !onnx_dest.exists() {
-        let url = format!("{base_url}/{}", spec.onnx_path);
-        download_file(&url, &onnx_dest)
+    if !weights_dest.exists() {
+        let url = format!("{base_url}/{}", spec.weights_path);
+        download_file(&url, &weights_dest)
             .await
-            .with_context(|| format!("failed to download ONNX model from {url}"))?;
+            .with_context(|| format!("failed to download weights from {url}"))?;
+    }
+
+    if !config_dest.exists() {
+        let url = format!("{base_url}/{}", spec.config_path);
+        download_file(&url, &config_dest)
+            .await
+            .with_context(|| format!("failed to download config from {url}"))?;
     }
 
     if !tokenizer_dest.exists() {
@@ -305,12 +308,11 @@ async fn ensure_model_files(spec: &ModelSpec, cache_dir: &Path) -> Result<(PathB
             .with_context(|| format!("failed to download tokenizer from {url}"))?;
     }
 
-    Ok((onnx_dest, tokenizer_dest))
+    Ok((weights_dest, config_dest, tokenizer_dest))
 }
 
 /// Download a URL to `dest`, writing to `dest.tmp` first then renaming atomically.
-/// Streams the response body in chunks so large model files (~130 MB) are never
-/// fully buffered in memory.
+/// Streams the response body in chunks so large model files are never fully buffered.
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -382,7 +384,7 @@ mod tests {
         let spec = spec.unwrap();
         assert_eq!(spec.name, "nomic-embed-text-v1.5");
         assert_eq!(spec.hf_repo, "nomic-ai/nomic-embed-text-v1.5");
-        assert_eq!(spec.onnx_path, "onnx/model.onnx");
+        assert_eq!(spec.weights_path, "model.safetensors");
         assert_eq!(spec.tokenizer_path, "tokenizer.json");
         assert_eq!(spec.max_length, 512);
         assert_eq!(spec.embedding_dim, 768);
