@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use burn::prelude::Module;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::{
@@ -15,6 +16,19 @@ use candle_transformers::models::{
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
+
+use crate::nomic_bert_burn::{
+    BurnNomicBertModel, burn_l2_normalize, burn_mean_pooling, load_nomic_bert_burn,
+    token_ids_to_burn_tensor,
+};
+
+// Feature-gated concrete backend type for the burn path.
+// NdArray is used when no GPU feature is active (testing / CPU fallback).
+#[cfg(feature = "wgpu")]
+type ActiveBackend = burn::backend::Wgpu;
+
+#[cfg(not(feature = "wgpu"))]
+type ActiveBackend = burn::backend::NdArray;
 
 /// Prints current RSS (from `ps`) to stderr for memory profiling.
 fn log_rss(label: &str) {
@@ -52,11 +66,13 @@ impl ModelRegistry {
     }
 }
 
-/// Discriminates which candle model architecture to load and run.
+/// Discriminates which model architecture to load and run.
 #[derive(Debug, Clone, Copy)]
 pub enum ModelKind {
     NomicBert,
     Bert,
+    /// NomicBERT implemented in burn (GPU via WGPU, CPU via NdArray).
+    BurnNomicBert,
 }
 
 /// Download coordinates for a model.
@@ -101,12 +117,25 @@ static KNOWN_MODELS: &[ModelSpec] = &[
         embedding_dim: 1024,
         model_kind: ModelKind::Bert,
     },
+    // Burn-based NomicBERT — same weights as the candle path, burn backend for WGPU GPU support.
+    // Uses the same HF repo and weights; only the inference path differs.
+    ModelSpec {
+        name: "nomic-embed-text-v1.5-burn",
+        hf_repo: "nomic-ai/nomic-embed-text-v1.5",
+        weights_path: "model.safetensors",
+        config_path: "config.json",
+        tokenizer_path: "tokenizer.json",
+        max_length: 512,
+        embedding_dim: 768,
+        model_kind: ModelKind::BurnNomicBert,
+    },
 ];
 
-/// Candle model variants — dispatched at runtime based on `ModelKind`.
+/// Model variants — dispatched at runtime based on `ModelKind`.
 enum EmbedderModel {
     NomicBert(NomicBertModel),
     Bert(BertModel),
+    BurnNomicBert(BurnNomicBertModel<ActiveBackend>),
 }
 
 /// Loaded embedder ready for inference.
@@ -137,32 +166,45 @@ impl Embedder {
         #[cfg(not(any(feature = "metal", feature = "cuda")))]
         let device = Device::Cpu;
 
-        log_rss("before VarBuilder");
-
-        // Memory-map the safetensors weights file. unsafe is required by candle API.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[&weights_file], DType::F32, &device)
-                .context("failed to load model weights")?
-        };
-
-        log_rss("after VarBuilder");
-
         let config_str = std::fs::read_to_string(&config_file)
             .with_context(|| format!("failed to read config {}", config_file.display()))?;
 
         let model = match spec.model_kind {
-            ModelKind::NomicBert => {
+            ModelKind::BurnNomicBert => {
+                // Burn path — does not use candle VarBuilder; loads via burn-store.
+                let burn_device = get_burn_device();
                 let config: NomicBertConfig = serde_json::from_str(&config_str)
-                    .context("failed to parse NomicBert config")?;
-                let m =
-                    NomicBertModel::load(vb, &config).context("failed to build NomicBertModel")?;
-                EmbedderModel::NomicBert(m)
+                    .context("failed to parse NomicBert config for burn path")?;
+                let m = load_nomic_bert_burn(&weights_file, &config, &burn_device)
+                    .context("failed to load burn NomicBertModel")?;
+                EmbedderModel::BurnNomicBert(m)
             }
-            ModelKind::Bert => {
-                let config: BertConfig =
-                    serde_json::from_str(&config_str).context("failed to parse Bert config")?;
-                let m = BertModel::load(vb, &config).context("failed to build BertModel")?;
-                EmbedderModel::Bert(m)
+            _ => {
+                // Candle path — load weights via VarBuilder.
+                log_rss("before VarBuilder");
+                let vb = unsafe {
+                    VarBuilder::from_mmaped_safetensors(&[&weights_file], DType::F32, &device)
+                        .context("failed to load model weights")?
+                };
+                log_rss("after VarBuilder");
+
+                match spec.model_kind {
+                    ModelKind::NomicBert => {
+                        let config: NomicBertConfig = serde_json::from_str(&config_str)
+                            .context("failed to parse NomicBert config")?;
+                        let m = NomicBertModel::load(vb, &config)
+                            .context("failed to build NomicBertModel")?;
+                        EmbedderModel::NomicBert(m)
+                    }
+                    ModelKind::Bert => {
+                        let config: BertConfig = serde_json::from_str(&config_str)
+                            .context("failed to parse Bert config")?;
+                        let m =
+                            BertModel::load(vb, &config).context("failed to build BertModel")?;
+                        EmbedderModel::Bert(m)
+                    }
+                    ModelKind::BurnNomicBert => unreachable!(),
+                }
             }
         };
 
@@ -226,6 +268,39 @@ impl Embedder {
             }
         }
 
+        // Burn path — use burn tensors and burn post-processing.
+        {
+            let model = self.model.lock().unwrap();
+            if let EmbedderModel::BurnNomicBert(m) = &*model {
+                let burn_device = m.devices().into_iter().next().unwrap_or_default();
+                let input_ids_burn = token_ids_to_burn_tensor::<ActiveBackend>(
+                    &ids_data,
+                    batch_size,
+                    seq_len,
+                    &burn_device,
+                );
+                let attention_mask_burn = token_ids_to_burn_tensor::<ActiveBackend>(
+                    &mask_data,
+                    batch_size,
+                    seq_len,
+                    &burn_device,
+                );
+                let hidden = m.forward(input_ids_burn, attention_mask_burn.clone());
+                let pooled = burn_mean_pooling(hidden, attention_mask_burn);
+                let normalized = burn_l2_normalize(pooled);
+                let tensor_data = normalized.into_data();
+                let flat = tensor_data
+                    .as_slice::<f32>()
+                    .map_err(|e| anyhow::anyhow!("failed to read burn tensor: {e:?}"))?;
+                let embedding_dim = flat.len() / batch_size;
+                let embeddings: Vec<Vec<f32>> = flat
+                    .chunks_exact(embedding_dim)
+                    .map(|c| c.to_vec())
+                    .collect();
+                return Ok(embeddings);
+            }
+        }
+
         let input_ids = Tensor::from_slice(&ids_data, (batch_size, seq_len), &self.device)
             .context("failed to create input_ids tensor")?;
         let attention_mask = Tensor::from_slice(&mask_data, (batch_size, seq_len), &self.device)
@@ -246,6 +321,7 @@ impl Embedder {
                     let zeros = Tensor::zeros_like(&input_ids)?;
                     m.forward(&input_ids, &zeros, Some(&attention_mask))?
                 }
+                EmbedderModel::BurnNomicBert(_) => unreachable!(),
             };
             if should_log_rss {
                 log_rss("after model.forward");
@@ -269,6 +345,13 @@ impl Embedder {
             .pop()
             .context("embed_batch returned empty result for single text")
     }
+}
+
+/// Return the burn device to use for the burn inference path.
+/// With the `wgpu` feature enabled, returns the default WGPU device (Metal / Vulkan / DX12).
+/// Without `wgpu`, returns the NdArray CPU device.
+fn get_burn_device() -> <ActiveBackend as burn::tensor::backend::Backend>::Device {
+    Default::default()
 }
 
 /// Download model files if missing, returning `(weights_path, config_path, tokenizer_path)`.
