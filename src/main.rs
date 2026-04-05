@@ -72,6 +72,9 @@ enum DaemonAction {
 
 /// Resolve the service backend: try daemon (auto-spawn if needed), fall back to in-process.
 fn resolve_service(project_root: &std::path::Path) -> Service {
+    if std::env::var("CARGO_DEBRIEF_NO_DAEMON").is_ok() {
+        return Service::new(None);
+    }
     let client = daemon::auto_spawn_and_connect(project_root);
     Service::new(client)
 }
