@@ -7,6 +7,8 @@ plans: null
 related:
   - 260403-research-rag-architecture  # architecture decisions in section 6
   - 260404-feat-dependency-chunking  # dep indexing increases index size, amplifies daemon value
+started: 2026-04-04
+completed: 2026-04-05
 ---
 
 # Daemon Mode — Per-Workspace Background Process
@@ -67,11 +69,65 @@ subcommands. Temp-file RPC directory setup.
 Implement temp-file-based RPC protocol. `DaemonClient` implements
 `DebriefService` — CLI dispatches through it when daemon is available.
 
+### Result (6304de3) - 26-04-04
+
+Phases 2A and 2B landed together. `src/daemon.rs` owns process lifecycle:
+PID file at `.git/debrief/daemon/daemon.pid` with advisory flock, 3-minute
+idle timeout (overridable via `CARGO_DEBRIEF_DAEMON_TIMEOUT`), and a debug
+binary-identity guard (`#[cfg(debug_assertions)]`) that kills and respawns a
+daemon built from a different binary.
+
+IPC landed as `src/ipc/` — platform-abstracted transport (Unix FIFOs with
+`poll(2)` / Windows atomic-rename with file polling), length-prefixed JSON
+protocol in `ipc/protocol.rs`. `DaemonClient` in `service.rs` implements
+`DebriefService`, with a `Service` enum dispatching `InProcess` vs `Daemon`
+paths. CLI gains `daemon status` and `daemon stop` subcommands plus a hidden
+`__daemon` entry point.
+
+Key adaptation from original design: temp-file RPC replaced by Unix FIFOs for
+lower latency; sandbox-compat concern was the original driver, but FIFOs proved
+cleaner than temp-file polling. Auto-spawn deferred to Phase 2C as planned.
+
 ### Phase 2C — Integration & Fallback
 
 Transparent daemon spawn on first CLI use. Fallback to in-process when
 daemon is unavailable. Index freshness notification (daemon detects
 git changes and re-indexes).
+
+### Result (e18a4ac) - 26-04-04
+
+`resolve_service()` in `main.rs` transparently auto-spawns the daemon on
+first CLI invocation. Spawn path acquires an exclusive flock on `daemon.pid`
+to serialize concurrent spawners (R1), runs `cleanup_stale` inside the flock
+to close a TOCTOU window (R4), re-execs `cargo debrief __daemon`, and polls
+readiness with a "spawning daemon.......done." progress line on stderr.
+
+`Service` struct wraps `Option<DaemonClient>` + `InProcessService` — each
+method tries the daemon first and falls back silently to in-process on any
+error (R3/R6). Daemon stdio set to `Stdio::null()` to avoid EPIPE panics on
+early exit. Integration tests added covering auto-spawn, fallback, and
+concurrent invocation.
+
+Key decisions baked in: R1 flock gap accepted (second daemon self-bails via
+its own PID flock); fallback is silent with debug logging only; git-aware
+re-indexing handled by the existing `InProcessService` on each request rather
+than a separate daemon-side watch loop.
+
+### Result (e589e0d) - 26-04-04 — Post-landing: Progress keepalive
+
+Long operations (rebuild-index, stale-index search) exceeded the fixed 120s
+`DaemonClient` timeout, causing silent fallback to a duplicate ONNX session.
+Fixed by sending `DaemonResponse::Progress` heartbeats every 10s while a
+handler runs. The client loops on response reads, resetting the timeout on
+each `Progress`. `oneshot` channel in daemon changed to `mpsc` to allow
+streaming. Readiness poll timeout bumped 30s → 60s.
+
+### Result (08908e4) - 26-04-05 — Post-landing: NO_DAEMON diagnostic env var
+
+Added `CARGO_DEBRIEF_NO_DAEMON` env var: when set, `resolve_service()` skips
+auto-spawn and falls back to `InProcessService`. Required for GPU memory
+profiling where `Stdio::null()` on the daemon hides RSS instrumentation
+output. Doubles as a general debug escape hatch.
 
 ## Development Notes
 
@@ -93,8 +149,13 @@ when starting Phase 2B.
 
 ## Open Questions
 
-- Temp-file RPC protocol details: request format, response format,
-  polling vs notification, cleanup of stale temp files
-- Index freshness in daemon: poll git HEAD on each request? Or rely on
-  client to signal staleness?
-- Concurrency: single-threaded tokio sufficient for per-workspace use?
+_All resolved at implementation time._
+
+- **IPC protocol**: Unix FIFOs (not temp files) with length-prefixed JSON.
+  Request/response documented in `src/ipc/protocol.rs`. Stale files cleaned
+  by `ipc::cleanup_ipc_files` on daemon shutdown.
+- **Index freshness**: Daemon holds no watch loop. `InProcessService` on each
+  request detects git HEAD changes via the existing git-tracking layer and
+  re-indexes as needed.
+- **Concurrency**: Single-threaded tokio confirmed sufficient. One request
+  processed at a time via the `ipc_loop` blocking thread + async bridge.
