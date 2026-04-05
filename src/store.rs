@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
 
-const INDEX_VERSION: u32 = 4;
+const INDEX_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 pub struct IndexData {
@@ -56,7 +56,7 @@ pub fn load_index(path: &Path) -> Result<Option<IndexData>> {
 // Dependency index
 // ---------------------------------------------------------------------------
 
-const DEPS_INDEX_VERSION: u32 = 1;
+const DEPS_INDEX_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 pub struct DepsIndexData {

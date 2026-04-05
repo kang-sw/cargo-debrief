@@ -2,6 +2,24 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+// /// Prints current RSS (from `ps`) to stderr for memory profiling.
+// fn log_rss(label: &str) {
+//     let pid = std::process::id();
+//     let output = std::process::Command::new("ps")
+//         .args(["-o", "rss=", "-p", &pid.to_string()])
+//         .output();
+//     match output {
+//         Ok(out) => {
+//             let raw = String::from_utf8_lossy(&out.stdout);
+//             match raw.trim().parse::<u64>() {
+//                 Ok(kb) => eprintln!("[RSS] {}: {:.1} MB", label, kb as f64 / 1024.0),
+//                 Err(_) => eprintln!("[RSS] {}: (unavailable)", label),
+//             }
+//         }
+//         Err(_) => eprintln!("[RSS] {}: (unavailable)", label),
+//     }
+// }
+
 use crate::{
     chunk::{Chunk, ChunkOrigin, ChunkType, Visibility},
     chunker::{Chunker, RustChunker},
@@ -357,6 +375,7 @@ fn build_dep_embedding_text(
 /// embeds in batches.
 async fn run_deps_index(project_root: &Path, embedder: &Embedder) -> Result<DepsIndexData> {
     let config = load_config(&config_paths(project_root))?;
+    // eprintln!("[deps] discovering dependency packages via cargo metadata...");
     let mut packages = deps::discover_dependency_packages(project_root)?;
     let lock_hash = cargo_lock_content_hash(project_root).ok();
 
@@ -372,11 +391,17 @@ async fn run_deps_index(project_root: &Path, embedder: &Embedder) -> Result<Deps
         packages.retain(|p| !exclude.contains(p.crate_name.as_str()));
     }
 
+    // eprintln!("[deps] found {} dependency packages (after exclude filter)", packages.len());
+    // log_rss("after cargo metadata");
+
     let chunker = RustChunker;
     let mut all_chunks: Vec<Chunk> = Vec::new();
     let mut all_embedding_texts: Vec<String> = Vec::new();
 
-    for package in &packages {
+    for (pkg_index, package) in packages.iter().enumerate() {
+        let _ = pkg_index; // used by diagnostic logging below
+        // eprintln!("[deps] [{}/{}] chunking {} (src: {})",
+        //     pkg_index + 1, packages.len(), package.crate_name, package.src_root.display());
         let src_dir = package.src_root.join("src");
         for rs_file in collect_dep_rs_files(&src_dir) {
             let relative = rs_file
@@ -412,17 +437,32 @@ async fn run_deps_index(project_root: &Path, embedder: &Embedder) -> Result<Deps
         }
     }
 
+    // eprintln!("[deps] collection complete: {} chunks from {} packages",
+    //     all_chunks.len(), packages.len());
+    // log_rss("after chunk collection");
+
     // Embed in batches.
     const EMBED_BATCH_SIZE: usize = 64;
     let embeddings: Vec<Vec<f32>> = if all_embedding_texts.is_empty() {
         vec![]
     } else {
         use std::io::Write;
+        let total_batches = (all_embedding_texts.len() + EMBED_BATCH_SIZE - 1) / EMBED_BATCH_SIZE;
+        // eprintln!("[deps] starting embedding ({} batches of max {})",
+        //     total_batches, EMBED_BATCH_SIZE);
         eprint!("indexing deps");
         let _ = std::io::stderr().flush();
 
         let mut accumulated = Vec::with_capacity(all_embedding_texts.len());
-        for batch in all_embedding_texts.chunks(EMBED_BATCH_SIZE) {
+        for (batch_idx, batch) in all_embedding_texts.chunks(EMBED_BATCH_SIZE).enumerate() {
+            let _ = (batch_idx, total_batches); // used by diagnostic logging below
+            // eprintln!("[deps] batch {}/{}: embedding chunks {}-{}",
+            //     batch_idx + 1, total_batches,
+            //     batch_idx * EMBED_BATCH_SIZE,
+            //     (batch_idx * EMBED_BATCH_SIZE + batch.len()).min(all_embedding_texts.len()));
+            // if batch_idx % 10 == 0 {
+            //     log_rss(&format!("embedding batch {}", batch_idx + 1));
+            // }
             let text_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
             accumulated.extend(embedder.embed_batch(&text_refs)?);
             eprint!(".");
@@ -488,8 +528,11 @@ impl DebriefService for InProcessService {
         let embedder = make_embedder(model_name).await?;
 
         // Full reindex: no prior commit, no existing index.
+        // eprintln!("[index] starting project index...");
         let (_data, result) = run_index(project_root, None, None, &embedder).await?;
+        // eprintln!("[index] project index done. Starting deps index...");
         run_deps_index(project_root, &embedder).await?;
+        // eprintln!("[index] deps index done.");
         Ok(result)
     }
 

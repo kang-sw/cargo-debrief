@@ -17,7 +17,7 @@
 | `chunker` | `src/chunker/mod.rs`, `src/chunker/rust.rs` | `Chunker` trait + `RustChunker` (tree-sitter AST walk) |
 | `git` | `src/git.rs` | Git file tracking via `Command` shellout |
 | `store` | `src/store.rs` | Versioned index serialization (bincode) |
-| `embedder` | `src/embedder.rs` | ONNX embedding pipeline: model registry, download, inference |
+| `embedder` | `src/embedder.rs` | Candle embedding pipeline: model registry, safetensors download, inference via `NomicBertModel`/`BertModel` |
 | `deps` | `src/deps.rs` | Cargo metadata parsing; dependency package discovery with root-dep reachability |
 | `search` | `src/search.rs` | Vector ANN search (hnsw_rs) with metadata score boosting |
 
