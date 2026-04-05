@@ -6,6 +6,7 @@ pub mod deps;
 pub mod embedder;
 pub mod git;
 pub mod ipc;
+pub mod nomic_bert_burn;
 pub mod search;
 pub mod service;
 pub mod store;

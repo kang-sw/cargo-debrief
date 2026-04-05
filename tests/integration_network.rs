@@ -347,3 +347,58 @@ async fn semantic_search_quality_smoke_test() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Burn NomicBERT integration gate
+// ---------------------------------------------------------------------------
+
+/// Verifies that the burn NomicBERT path produces correct 768-dim L2-normalized embeddings.
+/// This is the integration gate before candle can be removed in a later phase.
+/// Requires a network download of nomic-embed-text-v1.5 (~130MB, cached after first run).
+#[tokio::test]
+#[ignore]
+async fn burn_nomic_bert_produces_normalized_768d_vectors() {
+    if skip_if_no_network() {
+        return;
+    }
+
+    let cache_dir = model_cache_dir();
+    let embedder = Embedder::load("nomic-embed-text-v1.5-burn", &cache_dir)
+        .await
+        .expect("failed to load burn embedder");
+
+    let texts = [
+        "fn main() { println!(\"hello world\"); }",
+        "struct ConnectionPool { max_size: usize }",
+    ];
+    let embeddings = embedder.embed_batch(&texts).expect("embed_batch failed");
+
+    assert_eq!(embeddings.len(), 2, "expected 2 output vectors");
+
+    for (i, emb) in embeddings.iter().enumerate() {
+        assert_eq!(
+            emb.len(),
+            768,
+            "embedding {} should have 768 dims, got {}",
+            i,
+            emb.len()
+        );
+        let norm: f32 = emb.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "embedding {} should be L2-normalized, got norm={norm}",
+            i
+        );
+    }
+
+    // The two texts are different — their cosine similarity should be < 0.99
+    let dot: f32 = embeddings[0]
+        .iter()
+        .zip(embeddings[1].iter())
+        .map(|(a, b)| a * b)
+        .sum();
+    assert!(
+        dot < 0.99,
+        "embeddings for different texts should not be near-identical (cosine={dot:.4})"
+    );
+}
