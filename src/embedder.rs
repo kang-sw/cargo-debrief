@@ -1,12 +1,37 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use ort::{session::Session, value::Tensor};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
+
+/// Prints current RSS (from `ps`) to stderr for memory profiling.
+fn log_rss(label: &str) {
+    let pid = std::process::id();
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output();
+    match output {
+        Ok(out) => {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            match raw.trim().parse::<u64>() {
+                Ok(kb) => eprintln!("[RSS] {}: {:.1} MB", label, kb as f64 / 1024.0),
+                Err(_) => eprintln!("[RSS] {}: (unavailable)", label),
+            }
+        }
+        Err(_) => eprintln!("[RSS] {}: (unavailable)", label),
+    }
+}
+
+/// Counts how many times `embed_batch` has called `session.run`; used to
+/// limit RSS logging to the first 3 calls.
+static EMBED_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Known model identifiers and their HuggingFace repository locations.
 pub struct ModelRegistry;
@@ -75,7 +100,9 @@ impl Embedder {
 
         let (onnx_file, tokenizer_file) = ensure_model_files(&spec, cache_dir).await?;
 
+        log_rss("before session builder");
         let mut builder = Session::builder().context("failed to create ONNX session builder")?;
+        log_rss("after session builder");
 
         // GPU-first, CPU-fallback execution providers.
         // If the EP cannot register (missing runtime, unsupported hardware, etc.)
@@ -85,6 +112,7 @@ impl Embedder {
             builder = builder
                 .with_execution_providers([ort::ep::CoreML::default().build()])
                 .unwrap_or_else(|e| e.recover());
+            log_rss("after EP registration");
         }
 
         #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
@@ -92,11 +120,13 @@ impl Embedder {
             builder = builder
                 .with_execution_providers([ort::ep::CUDA::default().build()])
                 .unwrap_or_else(|e| e.recover());
+            log_rss("after EP registration");
         }
 
         let session = builder
             .commit_from_file(&onnx_file)
             .with_context(|| format!("failed to load ONNX model from {}", onnx_file.display()))?;
+        log_rss("after commit_from_file (model loaded)");
 
         let has_token_type_ids = session
             .inputs()
@@ -169,6 +199,11 @@ impl Embedder {
         // Run inference and extract hidden state as owned data before releasing the session lock.
         let (out_seq_len, hidden_dim, hidden_owned): (usize, usize, Vec<f32>) = {
             let mut session = self.session.lock().unwrap();
+            let call_index = EMBED_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+            let should_log_rss = call_index < 3;
+            if should_log_rss {
+                log_rss("before session.run");
+            }
             let outputs = if self.has_token_type_ids {
                 let type_ids_data = vec![0i64; batch_size * seq_len];
                 let type_ids_tensor = Tensor::<i64>::from_array((shape.as_slice(), type_ids_data))
@@ -188,6 +223,9 @@ impl Embedder {
                     })
                     .context("ONNX inference failed")?
             };
+            if should_log_rss {
+                log_rss("after session.run");
+            }
 
             let (out_shape, hidden_data) = outputs["last_hidden_state"]
                 .try_extract_tensor::<f32>()
