@@ -124,31 +124,53 @@ uses standard BERT architecture, not NomicBERT. candle-transformers has a
 `bert` module for this. Handle both model types via enum dispatch or defer
 bge support to a follow-up ticket.
 
-### Phase 3 — Validate and Benchmark
+### Result (ab2c77b) - 26-04-05
 
-- Run `cargo test` — all unit + offline integration tests pass
-- Run network integration tests — real embedding + search
-- Run search quality eval (24-query suite from `ai-docs/ref/search-quality-eval.md`)
-  to confirm no regression vs ort baseline (15/24 = 62.5%)
-- GPU memory: RSS stays bounded (target < 2 GB peak on macOS Metal)
-- Wall-clock comparison vs CPU baseline (9m37s for ripgrep full repo)
-- Test on a dependency-heavy project to validate the use case that motivated this
+ort fully replaced with candle. Embedder rewrite: EmbedderModel enum
+(NomicBert + Bert), safetensors loading via VarBuilder, Device selection
+(Metal/CUDA/CPU), mean_pooling/l2_normalize from candle builtins.
+Feature flags: gpu/cuda → metal/cuda. INDEX_VERSION 4→5, DEPS_INDEX_VERSION 1→2.
 
-### Phase 4 — Cleanup
+Build passes on default, `--features metal`, `--features cuda`.
+81 unit + offline integration tests pass. Mental model and spec updated.
+
+### Phase 3 — Validate and Benchmark [partial]
+
+### Result (validation) - 26-04-05
+
+**candle CPU path:** Working. Unit tests pass (81 passed, 0 failed).
+RSS stable at ~4 GB peak during inference (vs 42 GB with ort CoreML).
+Network integration tests pass (model downloads, embedding + search work).
+
+**candle Metal path:** FAILED. `no metal implementation for layer-norm`
+on first `model.forward()` call. candle 0.10.x Metal backend does not
+implement LayerNorm as a GPU kernel. This affects ALL transformer models,
+not just NomicBERT. Metal is unusable for our use case.
+
+**Deps indexing diagnostic:** Pipeline works correctly (no crash/hang).
+354 packages → 206,921 pub chunks → 3,234 batches. CPU embedding speed
+~27s/batch (release) → ~24 hours total. Impractical without GPU.
+
+**First forward RSS spike:** +4.9 GB on first candle inference call
+(gemm workspace allocation). Stabilizes after that. Acceptable.
+
+**Conclusion:** candle migration successful for CPU stability and
+crates.io publishability. GPU acceleration requires a different backend.
+burn + WGPU identified as the viable path — see epic
+`260405-epic-gpu-embedding-acceleration`.
+
+### Phase 4 — Cleanup [deferred]
 
 - Remove RSS instrumentation from embedder.rs
 - Remove `CARGO_DEBRIEF_NO_DAEMON` env var check (or keep if useful)
-- Remove any remaining ort references
-- Update mental model (`ai-docs/mental-model/embedder.md`)
-- Update spec if GPU behavior description changed
+- Deferred until burn+WGPU migration is complete (diagnostic code useful
+  for validating the next backend too)
 
-## Open Questions
+## Open Questions [resolved]
 
-- Does candle `NomicBertModel` produce bit-identical embeddings to the ort
-  ONNX path? Minor float differences are acceptable if search quality is
-  maintained, but index compatibility breaks (existing indexes become invalid).
-  → INDEX_VERSION bump required regardless.
-- Sharded vs single safetensors: nomic-embed-text-v1.5 may use a single
-  `model.safetensors` or sharded files. Need to check repo layout.
-- Is `candle-core` Metal backend stable on Apple Silicon, or does it have
-  its own edge cases? Research during planning.
+- ~~Sharded vs single safetensors~~ → single `model.safetensors` (~270 MB
+  for nomic, ~1.34 GB for bge)
+- ~~candle Metal stability~~ → Metal backend missing LayerNorm. Unusable
+  for transformers. burn+WGPU is the replacement path.
+- candle CPU produces different float values than ort → INDEX_VERSION
+  bumped to 5. Search quality TBD (network tests pass, full eval pending).
