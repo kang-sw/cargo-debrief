@@ -272,7 +272,11 @@ impl Embedder {
         {
             let model = self.model.lock().unwrap();
             if let EmbedderModel::BurnNomicBert(m) = &*model {
-                let burn_device = m.devices().into_iter().next().unwrap_or_default();
+                let burn_device = m
+                    .devices()
+                    .into_iter()
+                    .next()
+                    .expect("loaded burn model must have a device");
                 let input_ids_burn = token_ids_to_burn_tensor::<ActiveBackend>(
                     &ids_data,
                     batch_size,

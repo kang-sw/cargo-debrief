@@ -104,6 +104,10 @@ impl<B: Backend> BurnNomicBertAttention<B> {
     fn init(config: &NomicBertConfig, device: &B::Device) -> Self {
         let head_dim = config.n_embd / config.n_head;
         let rotary_emb_dim = (config.rotary_emb_fraction * head_dim as f64) as usize;
+        assert_eq!(
+            rotary_emb_dim, head_dim,
+            "partial RoPE rotation (rotary_emb_fraction < 1.0) is not supported"
+        );
 
         // RotaryEncodingConfig takes (max_sequence_length, d_model)
         let rotary_enc = RotaryEncodingConfig::new(config.n_positions, rotary_emb_dim)
@@ -373,7 +377,7 @@ pub fn burn_mean_pooling<B: Backend>(
     let sum_mask = mask_f
         .sum_dim(1)
         .squeeze_dim::<1>(1)
-        .clamp(1e-9, f32::MAX as f64)
+        .clamp(1e-9, f64::MAX)
         .unsqueeze_dim::<2>(1);
     sum_hidden / sum_mask
 }
@@ -390,7 +394,7 @@ pub fn burn_l2_normalize<B: Backend>(x: Tensor<B, 2>) -> Tensor<B, 2> {
         .sum_dim(1)
         .squeeze_dim::<1>(1)
         .sqrt()
-        .clamp(1e-12, f32::MAX as f64)
+        .clamp(1e-12, f64::MAX)
         .unsqueeze_dim::<2>(1);
     x / norm
 }
