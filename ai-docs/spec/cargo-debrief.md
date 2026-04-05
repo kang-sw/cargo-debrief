@@ -18,7 +18,7 @@ features:
   - Overview
   - Configuration
     - Embedding Model Management
-    - 🚧 GPU Acceleration
+    - GPU Acceleration
   - 🚧 LLM Chunk Summarization
     - Configuration
     - Behavior
@@ -386,30 +386,36 @@ cargo debrief config embedding.model <model-name> [--global]
 
 **Supported models:**
 
-| Name | Dim | Max tokens | HuggingFace repo |
-|------|-----|-----------|-----------------|
-| `nomic-embed-text-v1.5` (default) | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` |
-| `bge-large-en-v1.5` | 1024 | 512 | `BAAI/bge-large-en-v1.5` |
+| Name | Dim | Max tokens | HuggingFace repo | Weights file |
+|------|-----|-----------|-----------------|--------------|
+| `nomic-embed-text-v1.5` (default) | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` | `model.safetensors` |
+| `bge-large-en-v1.5` | 1024 | 512 | `BAAI/bge-large-en-v1.5` | `model.safetensors` |
 
-### 🚧 GPU Acceleration
+Downloaded files use safetensors format (not ONNX). Cached at
+`{data_dir}/debrief/models/{model_name}/model.safetensors` alongside
+`config.json` and `tokenizer.json`.
 
-ONNX Runtime execution provider selection with GPU-first, CPU-fallback:
+### GPU Acceleration
 
-- **macOS**: CoreML (Neural Engine / GPU)
-- **Linux/Windows**: CUDA (NVIDIA GPU)
-- **Fallback**: CPU (always available)
+Candle backend with device selection at load time — GPU-first, CPU-fallback:
 
-Enabled via cargo feature flags (`gpu`, `cuda`). Default build is
-CPU-only. Provider selection is automatic — if the GPU provider fails
-to initialize, falls back to CPU silently.
+- **macOS**: Metal (Apple GPU via `candle-core/metal`)
+- **Linux/Windows**: CUDA (NVIDIA GPU via `candle-core/cuda`)
+- **Fallback**: CPU (always available, no feature flag required)
+
+Enabled via cargo feature flags (`metal`, `cuda`). Default build is
+CPU-only. If the selected device fails to initialize, falls back to
+CPU silently.
 
 > [!note] Constraints
 > - Changing the model invalidates the existing index — a full re-index
 >   is required after switching models.
 > - Only models listed in the built-in registry are accepted.
 >   Arbitrary HuggingFace model names are not supported.
-> - GPU feature flags add build-time dependencies (CoreML framework,
+> - GPU feature flags add build-time dependencies (Metal framework,
 >   CUDA toolkit). Default build remains dependency-light.
+> - Users who previously built with `--features gpu` must switch to
+>   `--features metal` (macOS) or `--features cuda` (Linux/Windows).
 
 ## 🚧 LLM Chunk Summarization
 
@@ -486,7 +492,7 @@ Stored in `.git/debrief/` (local, not committed).
 
 ## Daemon Mode
 
-Per-workspace background process that keeps the ONNX model session and
+Per-workspace background process that keeps the candle model session and
 HNSW index loaded in memory, eliminating ~2-4 seconds of startup
 overhead on repeated CLI calls. In-process mode is the fallback when
 the daemon is unavailable.

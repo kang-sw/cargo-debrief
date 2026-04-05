@@ -8,9 +8,9 @@
 
 - `load_index` returns `Ok(None)` for both **missing file** and **version mismatch**. Callers cannot distinguish the two cases. Both are treated as "start fresh."
 - `save_index` creates all parent directories automatically (`create_dir_all`). Callers do not need to pre-create the index directory.
-- `IndexData::version` is always `INDEX_VERSION` (currently `4`) on write; on read, any mismatch silently discards the file.
+- `IndexData::version` is always `INDEX_VERSION` (currently `5`) on write; on read, any mismatch silently discards the file.
 - `IndexData::chunks` maps `PathBuf` → `Vec<Chunk>`. The key is the file path as provided by the caller — no normalization occurs inside `store`.
-- `load_deps_index` returns `Ok(None)` for missing file, deserialization failure, or `DEPS_INDEX_VERSION` (currently `1`) mismatch — same semantics as `load_index`. Callers treat `None` as "stale; reindex."
+- `load_deps_index` returns `Ok(None)` for missing file, deserialization failure, or `DEPS_INDEX_VERSION` (currently `2`) mismatch — same semantics as `load_index`. Callers treat `None` as "stale; reindex."
 - `save_deps_index` also calls `create_dir_all` on the parent directory.
 
 ## Coupling
