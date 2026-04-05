@@ -386,10 +386,11 @@ cargo debrief config embedding.model <model-name> [--global]
 
 **Supported models:**
 
-| Name | Dim | Max tokens | HuggingFace repo | Weights file |
-|------|-----|-----------|-----------------|--------------|
-| `nomic-embed-text-v1.5` (default) | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` | `model.safetensors` |
-| `bge-large-en-v1.5` | 1024 | 512 | `BAAI/bge-large-en-v1.5` | `model.safetensors` |
+| Name | Dim | Max tokens | HuggingFace repo | Weights file | Backend |
+|------|-----|-----------|-----------------|--------------|---------|
+| `nomic-embed-text-v1.5` (default) | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` | `model.safetensors` | candle |
+| `bge-large-en-v1.5` | 1024 | 512 | `BAAI/bge-large-en-v1.5` | `model.safetensors` | candle |
+| `nomic-embed-text-v1.5-burn` | 768 | 512 | `nomic-ai/nomic-embed-text-v1.5` | `model.safetensors` | burn (WGPU) |
 
 Downloaded files use safetensors format (not ONNX). Cached at
 `{data_dir}/debrief/models/{model_name}/model.safetensors` alongside
@@ -397,15 +398,27 @@ Downloaded files use safetensors format (not ONNX). Cached at
 
 ### GPU Acceleration
 
-Candle backend with device selection at load time — GPU-first, CPU-fallback:
+Two independent GPU backends — candle (Metal/CUDA) and burn (WGPU) — with
+device selection at load time and CPU fallback for both:
+
+**Candle backend** (default for `nomic-embed-text-v1.5` and `bge-large-en-v1.5`):
 
 - **macOS**: Metal (Apple GPU via `candle-core/metal`)
 - **Linux/Windows**: CUDA (NVIDIA GPU via `candle-core/cuda`)
 - **Fallback**: CPU (always available, no feature flag required)
 
-Enabled via cargo feature flags (`metal`, `cuda`). Default build is
-CPU-only. If the selected device fails to initialize, falls back to
-CPU silently.
+Enabled via cargo feature flags (`metal`, `cuda`).
+
+**Burn backend** (used for `nomic-embed-text-v1.5-burn`):
+
+- **Any platform**: WGPU (cross-platform GPU via `burn/wgpu` — Metal on macOS,
+  Vulkan on Linux, DX12 on Windows)
+- **Fallback**: NdArray CPU (no feature flag required)
+
+Enabled via the `wgpu` feature flag.
+
+Default build is CPU-only for both backends. If the selected device fails
+to initialize, falls back to CPU silently.
 
 > [!note] Constraints
 > - Changing the model invalidates the existing index — a full re-index
@@ -413,9 +426,10 @@ CPU silently.
 > - Only models listed in the built-in registry are accepted.
 >   Arbitrary HuggingFace model names are not supported.
 > - GPU feature flags add build-time dependencies (Metal framework,
->   CUDA toolkit). Default build remains dependency-light.
+>   CUDA toolkit, or WGPU). Default build remains dependency-light.
 > - Users who previously built with `--features gpu` must switch to
->   `--features metal` (macOS) or `--features cuda` (Linux/Windows).
+>   `--features metal` (macOS) or `--features cuda` (Linux/Windows) for
+>   the candle path, or `--features wgpu` for the burn path.
 
 ## 🚧 LLM Chunk Summarization
 
@@ -492,7 +506,7 @@ Stored in `.git/debrief/` (local, not committed).
 
 ## Daemon Mode
 
-Per-workspace background process that keeps the candle model session and
+Per-workspace background process that keeps the embedding model session and
 HNSW index loaded in memory, eliminating ~2-4 seconds of startup
 overhead on repeated CLI calls. In-process mode is the fallback when
 the daemon is unavailable.

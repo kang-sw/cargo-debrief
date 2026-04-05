@@ -66,6 +66,23 @@ Implement NomicBERT architecture using burn's `nn` module:
 Weight loading from safetensors via `SafetensorsFileRecorder` with
 key remapping from HuggingFace naming to burn parameter naming.
 
+#### Result (0e04e66) - 26-04-05
+
+Implemented in `src/nomic_bert_burn.rs` (517 LOC). Architecture: Embeddings,
+SwiGLU (manual 3-layer), Attention with RotaryEncoding, Block (pre/post-norm),
+Encoder, Model. Weight loading via burn-store `SafetensorsStore` +
+`PyTorchToBurnAdapter` (diverges from plan's `SafetensorsFileRecorder` — correct
+per actual burn 0.20 API). Encoder struct wrapper produces correct key paths
+naturally. `BurnNomicBert` variant added to `EmbedderModel`, `wgpu` feature flag,
+`nomic-embed-text-v1.5-burn` registry entry. INDEX_VERSION 6, DEPS_INDEX_VERSION 3.
+
+Deviations: burn-store API instead of burn-import (plan approximated wrong API),
+RotaryEncodingConfig arg order corrected. Review finding: partial RoPE assert
+guard added (fraction < 1.0 unsupported). Candle path fully preserved.
+
+Pending validation: network integration test (numerical consistency burn vs candle,
+cosine sim ≥ 0.99). Requires model download.
+
 ### Child ticket 2: BertModel in burn (for bge-large-en-v1.5)
 
 Standard BERT architecture. `bert-burn` exists in tracel-ai/models
