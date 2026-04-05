@@ -112,11 +112,18 @@ User-facing config for C++ project discovery:
 - Integration with CppChunker: discovered files → chunk pipeline
 - Integration tests with a small multi-file C++ project
 
+## Resolved Questions
+
+- **`.sln` parsing** → Yes, auto-discover all projects in the solution.
+  Parse `.sln` to find all `.vcxproj` references. Project name included
+  in embedding text (e.g., `[project: MyEngine]`) so queries can surface
+  project-level context.
+- **Depth / file count limit** → No artificial limits. Scale via GPU
+  acceleration (same philosophy as Rust dep indexing — 206K chunks solved
+  by GPU, not caps). If a solution has thousands of transitive headers,
+  index them all.
+
 ## Open Questions
 
-- Should `.sln` file be parsed to discover multiple `.vcxproj` files in
-  a solution, or require the user to specify the project?
 - CMake: should we attempt to parse `find_package` results or just use
   explicitly listed include paths?
-- Performance: large projects may have thousands of transitive headers.
-  Should there be a depth limit or file count cap?
