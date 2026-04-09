@@ -353,7 +353,6 @@ async fn semantic_search_quality_smoke_test() {
 // ---------------------------------------------------------------------------
 
 /// Verifies that the burn NomicBERT path produces correct 768-dim L2-normalized embeddings.
-/// This is the integration gate before candle can be removed in a later phase.
 /// Requires a network download of nomic-embed-text-v1.5 (~130MB, cached after first run).
 #[tokio::test]
 #[ignore]
@@ -363,7 +362,7 @@ async fn burn_nomic_bert_produces_normalized_768d_vectors() {
     }
 
     let cache_dir = model_cache_dir();
-    let embedder = Embedder::load("nomic-embed-text-v1.5-burn", &cache_dir)
+    let embedder = Embedder::load("nomic-embed-text-v1.5", &cache_dir)
         .await
         .expect("failed to load burn embedder");
 

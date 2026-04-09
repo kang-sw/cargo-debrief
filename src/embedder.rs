@@ -1,25 +1,16 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Mutex,
 };
 
 use anyhow::{Context, Result, bail};
 use burn::prelude::Module;
-use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::models::{
-    bert::{BertModel, Config as BertConfig},
-    nomic_bert::{Config as NomicBertConfig, NomicBertModel, l2_normalize, mean_pooling},
-};
 use indicatif::{ProgressBar, ProgressStyle};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
 
 use crate::nomic_bert_burn::{
-    BurnNomicBertModel, burn_l2_normalize, burn_mean_pooling, load_nomic_bert_burn,
-    token_ids_to_burn_tensor,
+    BurnNomicBertModel, NomicBertConfig, burn_l2_normalize, burn_mean_pooling,
+    load_nomic_bert_burn, token_ids_to_burn_tensor,
 };
 
 // Feature-gated concrete backend type for the burn path.
@@ -29,28 +20,6 @@ type ActiveBackend = burn::backend::Wgpu;
 
 #[cfg(not(feature = "wgpu"))]
 type ActiveBackend = burn::backend::NdArray;
-
-/// Prints current RSS (from `ps`) to stderr for memory profiling.
-fn log_rss(label: &str) {
-    let pid = std::process::id();
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
-        .output();
-    match output {
-        Ok(out) => {
-            let raw = String::from_utf8_lossy(&out.stdout);
-            match raw.trim().parse::<u64>() {
-                Ok(kb) => eprintln!("[RSS] {}: {:.1} MB", label, kb as f64 / 1024.0),
-                Err(_) => eprintln!("[RSS] {}: (unavailable)", label),
-            }
-        }
-        Err(_) => eprintln!("[RSS] {}: (unavailable)", label),
-    }
-}
-
-/// Counts how many times `embed_batch` has called model inference; used to
-/// limit RSS logging to the first 3 calls.
-static EMBED_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Known model identifiers and their HuggingFace repository locations.
 pub struct ModelRegistry;
@@ -64,15 +33,6 @@ impl ModelRegistry {
     pub fn lookup(name: &str) -> Option<ModelSpec> {
         KNOWN_MODELS.iter().find(|m| m.name == name).copied()
     }
-}
-
-/// Discriminates which model architecture to load and run.
-#[derive(Debug, Clone, Copy)]
-pub enum ModelKind {
-    NomicBert,
-    Bert,
-    /// NomicBERT implemented in burn (GPU via WGPU, CPU via NdArray).
-    BurnNomicBert,
 }
 
 /// Download coordinates for a model.
@@ -92,58 +52,23 @@ pub struct ModelSpec {
     pub max_length: usize,
     /// Output embedding dimension.
     pub embedding_dim: usize,
-    /// Model architecture for dispatch.
-    pub model_kind: ModelKind,
 }
 
-static KNOWN_MODELS: &[ModelSpec] = &[
-    ModelSpec {
-        name: "nomic-embed-text-v1.5",
-        hf_repo: "nomic-ai/nomic-embed-text-v1.5",
-        weights_path: "model.safetensors",
-        config_path: "config.json",
-        tokenizer_path: "tokenizer.json",
-        max_length: 512,
-        embedding_dim: 768,
-        model_kind: ModelKind::NomicBert,
-    },
-    ModelSpec {
-        name: "bge-large-en-v1.5",
-        hf_repo: "BAAI/bge-large-en-v1.5",
-        weights_path: "model.safetensors",
-        config_path: "config.json",
-        tokenizer_path: "tokenizer.json",
-        max_length: 512,
-        embedding_dim: 1024,
-        model_kind: ModelKind::Bert,
-    },
-    // Burn-based NomicBERT — same weights as the candle path, burn backend for WGPU GPU support.
-    // Uses the same HF repo and weights; only the inference path differs.
-    ModelSpec {
-        name: "nomic-embed-text-v1.5-burn",
-        hf_repo: "nomic-ai/nomic-embed-text-v1.5",
-        weights_path: "model.safetensors",
-        config_path: "config.json",
-        tokenizer_path: "tokenizer.json",
-        max_length: 512,
-        embedding_dim: 768,
-        model_kind: ModelKind::BurnNomicBert,
-    },
-];
-
-/// Model variants — dispatched at runtime based on `ModelKind`.
-enum EmbedderModel {
-    NomicBert(NomicBertModel),
-    Bert(BertModel),
-    BurnNomicBert(BurnNomicBertModel<ActiveBackend>),
-}
+static KNOWN_MODELS: &[ModelSpec] = &[ModelSpec {
+    name: "nomic-embed-text-v1.5",
+    hf_repo: "nomic-ai/nomic-embed-text-v1.5",
+    weights_path: "model.safetensors",
+    config_path: "config.json",
+    tokenizer_path: "tokenizer.json",
+    max_length: 512,
+    embedding_dim: 768,
+}];
 
 /// Loaded embedder ready for inference.
 pub struct Embedder {
-    model: Mutex<EmbedderModel>,
+    model: Mutex<BurnNomicBertModel<ActiveBackend>>,
     tokenizer: Tokenizer,
     max_length: usize,
-    device: Device,
 }
 
 impl Embedder {
@@ -156,59 +81,14 @@ impl Embedder {
         let (weights_file, config_file, tokenizer_file) =
             ensure_model_files(&spec, cache_dir).await?;
 
-        // Device selection: Metal > CUDA > CPU, each feature-gated.
-        #[cfg(feature = "metal")]
-        let device = Device::new_metal(0).unwrap_or(Device::Cpu);
-
-        #[cfg(all(not(feature = "metal"), feature = "cuda"))]
-        let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-
-        #[cfg(not(any(feature = "metal", feature = "cuda")))]
-        let device = Device::Cpu;
-
         let config_str = std::fs::read_to_string(&config_file)
             .with_context(|| format!("failed to read config {}", config_file.display()))?;
 
-        let model = match spec.model_kind {
-            ModelKind::BurnNomicBert => {
-                // Burn path — does not use candle VarBuilder; loads via burn-store.
-                let burn_device = get_burn_device();
-                let config: NomicBertConfig = serde_json::from_str(&config_str)
-                    .context("failed to parse NomicBert config for burn path")?;
-                let m = load_nomic_bert_burn(&weights_file, &config, &burn_device)
-                    .context("failed to load burn NomicBertModel")?;
-                EmbedderModel::BurnNomicBert(m)
-            }
-            _ => {
-                // Candle path — load weights via VarBuilder.
-                log_rss("before VarBuilder");
-                let vb = unsafe {
-                    VarBuilder::from_mmaped_safetensors(&[&weights_file], DType::F32, &device)
-                        .context("failed to load model weights")?
-                };
-                log_rss("after VarBuilder");
-
-                match spec.model_kind {
-                    ModelKind::NomicBert => {
-                        let config: NomicBertConfig = serde_json::from_str(&config_str)
-                            .context("failed to parse NomicBert config")?;
-                        let m = NomicBertModel::load(vb, &config)
-                            .context("failed to build NomicBertModel")?;
-                        EmbedderModel::NomicBert(m)
-                    }
-                    ModelKind::Bert => {
-                        let config: BertConfig = serde_json::from_str(&config_str)
-                            .context("failed to parse Bert config")?;
-                        let m =
-                            BertModel::load(vb, &config).context("failed to build BertModel")?;
-                        EmbedderModel::Bert(m)
-                    }
-                    ModelKind::BurnNomicBert => unreachable!(),
-                }
-            }
-        };
-
-        log_rss("after model construction");
+        let burn_device = get_burn_device();
+        let config: NomicBertConfig =
+            serde_json::from_str(&config_str).context("failed to parse NomicBert config")?;
+        let model = load_nomic_bert_burn(&weights_file, &config, &burn_device)
+            .context("failed to load burn NomicBertModel")?;
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_file)
             .map_err(|e| anyhow::anyhow!("failed to load tokenizer: {e}"))?;
@@ -230,7 +110,6 @@ impl Embedder {
             model: Mutex::new(model),
             tokenizer,
             max_length: spec.max_length,
-            device,
         })
     }
 
@@ -254,7 +133,6 @@ impl Embedder {
             .unwrap_or(0)
             .min(self.max_length);
 
-        // candle embedding layers expect u32 token indices (not i64).
         let mut ids_data = vec![0u32; batch_size * seq_len];
         let mut mask_data = vec![0u32; batch_size * seq_len];
 
@@ -268,76 +146,32 @@ impl Embedder {
             }
         }
 
-        // Burn path — use burn tensors and burn post-processing.
-        {
-            let model = self.model.lock().unwrap();
-            if let EmbedderModel::BurnNomicBert(m) = &*model {
-                let burn_device = m
-                    .devices()
-                    .into_iter()
-                    .next()
-                    .expect("loaded burn model must have a device");
-                let input_ids_burn = token_ids_to_burn_tensor::<ActiveBackend>(
-                    &ids_data,
-                    batch_size,
-                    seq_len,
-                    &burn_device,
-                );
-                let attention_mask_burn = token_ids_to_burn_tensor::<ActiveBackend>(
-                    &mask_data,
-                    batch_size,
-                    seq_len,
-                    &burn_device,
-                );
-                let hidden = m.forward(input_ids_burn, attention_mask_burn.clone());
-                let pooled = burn_mean_pooling(hidden, attention_mask_burn);
-                let normalized = burn_l2_normalize(pooled);
-                let tensor_data = normalized.into_data();
-                let flat = tensor_data
-                    .as_slice::<f32>()
-                    .map_err(|e| anyhow::anyhow!("failed to read burn tensor: {e:?}"))?;
-                let embedding_dim = flat.len() / batch_size;
-                let embeddings: Vec<Vec<f32>> = flat
-                    .chunks_exact(embedding_dim)
-                    .map(|c| c.to_vec())
-                    .collect();
-                return Ok(embeddings);
-            }
-        }
-
-        let input_ids = Tensor::from_slice(&ids_data, (batch_size, seq_len), &self.device)
-            .context("failed to create input_ids tensor")?;
-        let attention_mask = Tensor::from_slice(&mask_data, (batch_size, seq_len), &self.device)
-            .context("failed to create attention_mask tensor")?;
-
-        let hidden_states = {
-            let model = self.model.lock().unwrap();
-            let call_index = EMBED_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-            let should_log_rss = call_index < 3;
-            if should_log_rss {
-                log_rss("before model.forward");
-            }
-            let result = match &*model {
-                EmbedderModel::NomicBert(m) => {
-                    m.forward(&input_ids, None, Some(&attention_mask))?
-                }
-                EmbedderModel::Bert(m) => {
-                    let zeros = Tensor::zeros_like(&input_ids)?;
-                    m.forward(&input_ids, &zeros, Some(&attention_mask))?
-                }
-                EmbedderModel::BurnNomicBert(_) => unreachable!(),
-            };
-            if should_log_rss {
-                log_rss("after model.forward");
-            }
-            result
-        };
-
-        // mean_pooling and l2_normalize are free functions from the nomic_bert module;
-        // they operate on generic Tensors so they work for both NomicBert and Bert outputs.
-        let pooled = mean_pooling(&hidden_states, &attention_mask)?;
-        let normalized = l2_normalize(&pooled)?;
-        let embeddings: Vec<Vec<f32>> = normalized.to_vec2::<f32>()?;
+        let model = self.model.lock().unwrap();
+        let burn_device = model
+            .devices()
+            .into_iter()
+            .next()
+            .expect("loaded burn model must have a device");
+        let input_ids_burn =
+            token_ids_to_burn_tensor::<ActiveBackend>(&ids_data, batch_size, seq_len, &burn_device);
+        let attention_mask_burn = token_ids_to_burn_tensor::<ActiveBackend>(
+            &mask_data,
+            batch_size,
+            seq_len,
+            &burn_device,
+        );
+        let hidden = model.forward(input_ids_burn, attention_mask_burn.clone());
+        let pooled = burn_mean_pooling(hidden, attention_mask_burn);
+        let normalized = burn_l2_normalize(pooled);
+        let tensor_data = normalized.into_data();
+        let flat = tensor_data
+            .as_slice::<f32>()
+            .map_err(|e| anyhow::anyhow!("failed to read burn tensor: {e:?}"))?;
+        let embedding_dim = flat.len() / batch_size;
+        let embeddings: Vec<Vec<f32>> = flat
+            .chunks_exact(embedding_dim)
+            .map(|c| c.to_vec())
+            .collect();
 
         Ok(embeddings)
     }
@@ -480,14 +314,6 @@ mod tests {
     #[test]
     fn model_registry_lookup_unknown() {
         assert!(ModelRegistry::lookup("not-a-model").is_none());
-    }
-
-    #[test]
-    fn model_registry_lookup_bge() {
-        let spec = ModelRegistry::lookup("bge-large-en-v1.5");
-        assert!(spec.is_some());
-        let spec = spec.unwrap();
-        assert_eq!(spec.embedding_dim, 1024);
     }
 
     #[tokio::test]

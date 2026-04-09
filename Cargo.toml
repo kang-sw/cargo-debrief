@@ -16,9 +16,6 @@ futures-util = "0.3"
 indicatif = "0.17"
 burn = { version = "0.20", default-features = false, features = ["ndarray", "store"] }
 burn-store = { version = "0.20", default-features = false, features = ["std", "safetensors", "pytorch"] }
-candle-core = { version = "0.10" }
-candle-nn = { version = "0.10" }
-candle-transformers = { version = "0.10" }
 reqwest = { version = "0.12", features = ["stream"] }
 serde = { version = "1", features = ["derive"] }
 tokenizers = "0.19"
@@ -34,6 +31,5 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 tempfile = "3"
 
 [features]
-metal = ["candle-core/metal"]
-cuda = ["candle-core/cuda"]
+default = ["wgpu"]
 wgpu = ["burn/wgpu"]

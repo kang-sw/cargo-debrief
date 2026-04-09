@@ -25,7 +25,108 @@ use burn::{
     },
 };
 use burn_store::{ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
-use candle_transformers::models::nomic_bert::Config as NomicBertConfig;
+use serde::Deserialize;
+
+/// Configuration for the NomicBERT model architecture.
+///
+/// Matches the fields present in the HuggingFace `config.json` for
+/// `nomic-ai/nomic-embed-text-v1.5`. All fields carry `#[serde(default)]`
+/// so a partial config.json still parses correctly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NomicBertConfig {
+    #[serde(default = "NomicBertConfig::default_vocab_size")]
+    pub vocab_size: usize,
+    #[serde(default = "NomicBertConfig::default_n_embd")]
+    pub n_embd: usize,
+    #[serde(default = "NomicBertConfig::default_type_vocab_size")]
+    pub type_vocab_size: usize,
+    #[serde(default = "NomicBertConfig::default_n_inner")]
+    pub n_inner: usize,
+    #[serde(default = "NomicBertConfig::default_n_head")]
+    pub n_head: usize,
+    #[serde(default = "NomicBertConfig::default_n_layer")]
+    pub n_layer: usize,
+    #[serde(default = "NomicBertConfig::default_layer_norm_epsilon")]
+    pub layer_norm_epsilon: f64,
+    #[serde(default = "NomicBertConfig::default_rotary_emb_fraction")]
+    pub rotary_emb_fraction: f64,
+    #[serde(default = "NomicBertConfig::default_rotary_emb_base")]
+    pub rotary_emb_base: f64,
+    /// Maps from `max_position_embeddings` in HuggingFace config.json.
+    #[serde(
+        default = "NomicBertConfig::default_n_positions",
+        rename = "max_position_embeddings"
+    )]
+    pub n_positions: usize,
+    #[serde(default = "NomicBertConfig::default_qkv_proj_bias")]
+    pub qkv_proj_bias: bool,
+    #[serde(default = "NomicBertConfig::default_prenorm")]
+    pub prenorm: bool,
+    #[serde(default = "NomicBertConfig::default_pad_token_id")]
+    pub pad_token_id: usize,
+}
+
+impl NomicBertConfig {
+    fn default_vocab_size() -> usize {
+        30528
+    }
+    fn default_n_embd() -> usize {
+        768
+    }
+    fn default_type_vocab_size() -> usize {
+        2
+    }
+    fn default_n_inner() -> usize {
+        2048
+    }
+    fn default_n_head() -> usize {
+        12
+    }
+    fn default_n_layer() -> usize {
+        12
+    }
+    fn default_layer_norm_epsilon() -> f64 {
+        1e-12
+    }
+    fn default_rotary_emb_fraction() -> f64 {
+        1.0
+    }
+    fn default_rotary_emb_base() -> f64 {
+        10000.0
+    }
+    fn default_n_positions() -> usize {
+        2048
+    }
+    fn default_qkv_proj_bias() -> bool {
+        false
+    }
+    fn default_prenorm() -> bool {
+        false
+    }
+    fn default_pad_token_id() -> usize {
+        0
+    }
+}
+
+impl Default for NomicBertConfig {
+    fn default() -> Self {
+        Self {
+            vocab_size: Self::default_vocab_size(),
+            n_embd: Self::default_n_embd(),
+            type_vocab_size: Self::default_type_vocab_size(),
+            n_inner: Self::default_n_inner(),
+            n_head: Self::default_n_head(),
+            n_layer: Self::default_n_layer(),
+            layer_norm_epsilon: Self::default_layer_norm_epsilon(),
+            rotary_emb_fraction: Self::default_rotary_emb_fraction(),
+            rotary_emb_base: Self::default_rotary_emb_base(),
+            n_positions: Self::default_n_positions(),
+            qkv_proj_bias: Self::default_qkv_proj_bias(),
+            prenorm: Self::default_prenorm(),
+            pad_token_id: Self::default_pad_token_id(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Embeddings
