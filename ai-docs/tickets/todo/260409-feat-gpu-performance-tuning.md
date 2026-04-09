@@ -47,15 +47,38 @@ Optimize burn+WGPU embedding throughput further. Per-chunk throughput
 is already 3.4x faster than ort CPU, but wall time on full
 project+deps indexing may benefit from larger batches and async dispatch.
 
+## Prerequisite: per-stage tracing
+
+Before any optimization, the new service.rs (from `260409-epic-multi-language-sources`
+glue layer rewrite) must emit per-stage timing via the `tracing` crate.
+Pipeline spans:
+
+```
+rebuild_index
+  ├─ file_discovery     (git ls-files, per source)
+  ├─ chunking           (tree-sitter, per file)
+  ├─ tokenization       (per batch)
+  ├─ embedding          (GPU/CPU inference, per batch)
+  └─ index_build        (HNSW construction)
+```
+
+Use `tracing::info_span!` + `#[instrument]` for automatic span timing.
+`tracing-subscriber` with `fmt` layer for console output. This gives
+structured timing data without manual `Instant::now()` boilerplate, and
+extends naturally to daemon structured logging later.
+
+Current benchmark (17m21s total) has no stage breakdown — optimization
+without this data is guesswork.
+
 ## Agenda
 
-1. **Batch size sweep.** Benchmark EMBED_BATCH_SIZE at 64, 128, 256, 512
-   on ripgrep (3K chunks) and a larger dep corpus. Measure wall time and
-   peak memory. Find the sweet spot where GPU compute saturates without
-   OOM.
+1. **Batch size sweep.** Benchmark EMBED_BATCH_SIZE at 128, 256, 512,
+   1024 on ripgrep. Measure wall time, peak memory, and per-stage
+   breakdown from tracing output. Find the sweet spot where GPU compute
+   saturates without OOM.
 
 2. **First-batch warmup cost.** WGPU/CubeCL compiles shaders on first
-   inference. Quantify the one-time cost and decide whether a dummy
+   inference. Quantify via tracing spans and decide whether a dummy
    warmup batch is worth adding (relevant for daemon cold start).
 
 3. **Sequence length padding.** Current tokenizer pads to batch-longest.

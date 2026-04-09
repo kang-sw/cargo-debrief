@@ -160,6 +160,10 @@ is concurrent).
   `rebuild-index`, `search`, `overview`, `config`, `daemon`
 - service.rs: config-driven `rebuild_index` / `ensure_index_fresh`,
   chunker dispatch by language, scoped `git ls-files` per source root
+- `tracing` instrumentation: `info_span!` per pipeline stage
+  (file_discovery, chunking, tokenization, embedding, index_build).
+  `tracing-subscriber` `fmt` layer for console. Provides per-stage
+  timing for GPU optimization work (`260409-feat-gpu-performance-tuning`).
 - Delete deps.rs, remove `cargo_metadata` from Cargo.toml
 - Backward compat: if no config.toml, auto-detect Cargo.toml and
   behave as current (equivalent to implicit `add rust`)
