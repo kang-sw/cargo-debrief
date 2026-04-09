@@ -2,8 +2,6 @@
 title: "GPU Embedding Acceleration — burn + WGPU Cross-Platform Backend"
 category: epic
 priority: high
-parent: null
-plans: null
 related:
   - 260404-fix-gpu-acceleration      # candle migration (Phase 1-2 done, Metal failed)
   - 260404-feat-dependency-chunking   # GPU needed for practical dep indexing (206K chunks)

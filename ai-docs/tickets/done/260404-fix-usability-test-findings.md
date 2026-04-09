@@ -2,9 +2,7 @@
 title: "Fix usability test findings — batch embedding, chunker quality, UX"
 category: bug
 priority: critical
-parent: null
 started: 2026-04-04
-plans: null
 related:
   - 260404-idea-usability-test-repos  # test that produced these findings
   - 260404-feat-rust-chunking-population  # P1 overlaps with chunking improvements

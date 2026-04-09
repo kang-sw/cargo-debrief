@@ -5,9 +5,6 @@ completed: 2026-04-04
 parent: 260403-epic-mvp-implementation
 related:
   - 260403-research-rag-architecture  # architecture decisions
-plans:
-  phase-1: null
-  phase-2: null
 ---
 
 # CLI Scaffold, Config System, and Service Trait

@@ -2,11 +2,6 @@
 title: "On-Demand Dependency Indexing — --dep flag with per-dep cached indexes"
 category: feat
 priority: high
-parent: null
-plans:
-  phase-1: null
-  phase-2: null
-  phase-3: null
 related:
   - 260404-feat-dependency-chunking    # existing all-deps approach (to be superseded)
   - 260405-feat-cpp-chunker            # C++ chunker needed for C++ dep indexing
