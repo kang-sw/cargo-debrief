@@ -1,8 +1,6 @@
 ---
 category: research
 priority: high
-parent: null
-plans: null
 related:
   - 260404-refactor-service-trait-multi-workspace  # refines the daemon/service design from section 6
 ---

@@ -4,8 +4,6 @@ parent: 260403-epic-mvp-implementation
 related:
   - 260404-feat-cli-scaffold-config-service  # original trait definition
   - 260404-feat-core-indexing-pipeline  # depends on trait shape
-plans:
-  phase-1: null
 started: 2026-04-04
 completed: 2026-04-04
 ---

@@ -1,4 +1,29 @@
+<!-- Memory policy: prune aggressively as project advances. Completed
+     work belongs in git history, not here. Keep only what an AI session
+     needs to orient itself and pick up work. If it's derivable from
+     code or git log, delete it from this file. -->
+
 # cargo-debrief — Project Index
+
+## Project Summary
+
+**cargo-debrief** — A Rust CLI tool that provides RAG
+(Retrieval-Augmented Generation) over codebases. Uses tree-sitter for
+AST-aware chunking and vector search with metadata boosting to feed
+LLMs only the relevant code fragments, reducing context window consumption.
+CLI-first with a lazy-spawned background daemon for index serving.
+
+## Tech Stack
+
+Rust (2024 edition). Key libs: tree-sitter, ort (ONNX Runtime), clap, serde,
+tokio.
+
+## Workspace
+
+```
+src/           — Main source code
+ai-docs/       — Project knowledge and cross-session context
+```
 
 ## Architecture
 
@@ -54,7 +79,7 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 
 ## Spec
 
-- `spec/cargo-debrief.md` — Full feature spec: indexing, search, CLI, daemon, model management
+- `ref/cargo-debrief.md` — Full feature spec: indexing, search, CLI, daemon, model management
 
 ## Conventions
 
@@ -115,8 +140,7 @@ B  Rust chunking population        — additional node kinds, informed by A resu
 D  C++/Python chunkers             — language expansion
 ```
 
-Tickets: `260404-idea-usability-test-repos` (A), `260404-feat-dependency-chunking` (C),
-`260404-feat-daemon-mode` (D*), `260404-feat-llm-chunk-summarization` (E),
+Tickets: `260404-feat-llm-chunk-summarization` (E),
 `260404-feat-rust-chunking-population` (B)
 
 ## Session Notes

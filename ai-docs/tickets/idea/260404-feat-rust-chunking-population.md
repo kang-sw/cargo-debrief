@@ -2,7 +2,6 @@
 title: "Rust chunking population improvement — additional node kinds and quality"
 category: feat
 priority: medium
-parent: null
 related:
   - 260404-feat-core-indexing-pipeline  # MVP chunking baseline
   - 260403-research-rag-architecture

@@ -3,7 +3,6 @@ title: "GPU Acceleration — Migrate from ort to candle for Cross-Platform GPU E
 category: feat
 priority: high
 started: 2026-04-05
-parent: null
 plans:
   phase-2: 2026-04/05-1400.candle-migration
 related:

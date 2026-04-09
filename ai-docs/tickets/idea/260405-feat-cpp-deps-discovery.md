@@ -2,9 +2,6 @@
 title: "C++ Dependency Indexing — on-demand path-based with header-only default"
 category: feat
 priority: medium
-parent: null
-plans:
-  phase-1: null
 related:
   - 260405-feat-cpp-chunker              # prerequisite — chunker must exist first
   - 260405-feat-on-demand-dep-indexing   # shared --dep infrastructure

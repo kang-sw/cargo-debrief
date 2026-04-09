@@ -2,8 +2,6 @@
 title: "LLM Chunk Summarization — External LLM for Embedding Enrichment"
 category: feat
 priority: medium
-parent: null
-plans: null
 related:
   - 260404-fix-usability-test-findings  # structural query weakness motivates this
   - 260404-feat-dependency-chunking     # dep chunks also benefit from summaries

@@ -2,8 +2,6 @@
 title: "Dependency Chunking — Index Transitive Dependencies (Rust)"
 category: feat
 priority: high
-parent: null
-plans: null
 related:
   - 260403-research-rag-architecture  # vector search + metadata boosting baseline
   - 260404-feat-rust-chunking-population  # chunker quality affects dep indexing

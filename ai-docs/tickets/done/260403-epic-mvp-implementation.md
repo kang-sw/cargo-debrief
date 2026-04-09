@@ -1,8 +1,6 @@
 ---
 category: epic
 priority: high
-parent: null
-plans: null
 related:
   - 260404-refactor-service-trait-multi-workspace  # cross-cutting: multi-workspace trait shape
 ---
