@@ -73,8 +73,33 @@ candle and its broken feature flags (`metal`, `cuda`) are now dead weight.
   implementation exists. Dropped with candle. Can be re-added later if needed
   (burn BertModel implementation, epic child ticket 2).
 
+## Post-merge finding: cubek-matmul panic on real workloads
+
+**Benchmark on ripgrep (2026-04-09) revealed that burn+WGPU panics on
+real indexing workloads** due to cubek-matmul 0.1.1 selecting a matmul
+algorithm requiring 40KB threadgroup shared memory (M3 Max limit: 32KB).
+The earlier validation test (2 short strings, 5.73s) passed because
+small inputs use a different matmul algorithm that fits in 32KB.
+
+Additionally, burn NdArray CPU is ~2x slower than the old candle/ort CPU
+path (>15 min vs 9m37s on ripgrep).
+
+This means the candle removal may have been premature — the only
+previously working CPU inference path (candle, 9m37s) is now gone, and
+GPU doesn't work on real workloads. See `260409-feat-gpu-performance-tuning`
+for resolution options.
+
+**This does not invalidate the burn unification decision** — the code
+simplification is real and the architecture is right. But GPU acceleration
+needs a fix before it delivers on its promise, and a CPU fallback faster
+than burn NdArray may be needed in the interim.
+
 ## Open Questions
 
 - Runtime fallback: if wgpu feature is on but no GPU adapter found at runtime,
   does burn-wgpu degrade gracefully or error? Needs testing on headless/CI
   environments.
+- Should candle CPU be restored as an optional fallback until cubek-matmul
+  bug is resolved? Or is burn NdArray (slower) acceptable?
+- Is the cubek-matmul panic specific to M3 Max, or does it affect all
+  Apple Silicon (M1/M2/M4 have same 32KB threadgroup limit)?
