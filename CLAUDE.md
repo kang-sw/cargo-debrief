@@ -97,4 +97,4 @@ alternatives considered, and trade-offs — focus on _why_ this approach was cho
      wrong results, it belongs here. Everything else goes in
      _index.md (context) or skills (process). -->
 
-<!-- Template Version: v0017 -->
+<!-- Template Version: v0019 -->
