@@ -1,25 +1,31 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use burn::prelude::Module;
 use indicatif::{ProgressBar, ProgressStyle};
-use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
+// Tokenizer import is shared by both backends (both structs carry a Tokenizer field).
+// The no-feature build is caught by compile_error in lib.rs before this is relevant.
+#[cfg(any(feature = "wgpu", feature = "ort-cpu"))]
+use tokenizers::Tokenizer;
 
+// Tokenizer configuration types used only in the wgpu (burn) inference path.
+#[cfg(feature = "wgpu")]
+use tokenizers::{PaddingParams, PaddingStrategy, TruncationParams, TruncationStrategy};
+
+#[cfg(feature = "wgpu")]
+use std::sync::Mutex;
+
+#[cfg(feature = "wgpu")]
+use burn::prelude::Module;
+
+#[cfg(feature = "wgpu")]
 use crate::nomic_bert_burn::{
     BurnNomicBertModel, NomicBertConfig, burn_l2_normalize, burn_mean_pooling,
     load_nomic_bert_burn, token_ids_to_burn_tensor,
 };
 
 // Feature-gated concrete backend type for the burn path.
-// NdArray is used when no GPU feature is active (testing / CPU fallback).
 #[cfg(feature = "wgpu")]
 type ActiveBackend = burn::backend::Wgpu;
-
-#[cfg(not(feature = "wgpu"))]
-type ActiveBackend = burn::backend::NdArray;
 
 /// Known model identifiers and their HuggingFace repository locations.
 pub struct ModelRegistry;
@@ -65,12 +71,25 @@ static KNOWN_MODELS: &[ModelSpec] = &[ModelSpec {
 }];
 
 /// Loaded embedder ready for inference.
+#[cfg(feature = "wgpu")]
 pub struct Embedder {
     model: Mutex<BurnNomicBertModel<ActiveBackend>>,
     tokenizer: Tokenizer,
     max_length: usize,
 }
 
+/// Placeholder Embedder for the ort-cpu build path.
+/// Inference implementation is filled in during Phase 2.
+#[cfg(feature = "ort-cpu")]
+pub struct Embedder {
+    // Phase 2 will use these fields; suppress dead_code until then.
+    #[allow(dead_code)]
+    tokenizer: Tokenizer,
+    #[allow(dead_code)]
+    max_length: usize,
+}
+
+#[cfg(feature = "wgpu")]
 impl Embedder {
     /// Load or download the named model into `cache_dir`.
     /// Displays a progress bar if a download is needed.
@@ -185,15 +204,36 @@ impl Embedder {
     }
 }
 
+/// ort-cpu stub implementation — filled in during Phase 2.
+#[cfg(feature = "ort-cpu")]
+impl Embedder {
+    pub async fn load(_model_name: &str, _cache_dir: &Path) -> Result<Self> {
+        unimplemented!("ort-cpu embedder load: Phase 2 not yet implemented")
+    }
+
+    pub fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        unimplemented!("ort-cpu embed_batch: Phase 2 not yet implemented")
+    }
+
+    pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let mut batch = self.embed_batch(&[text])?;
+        batch
+            .pop()
+            .context("embed_batch returned empty result for single text")
+    }
+}
+
 /// Return the burn device to use for the burn inference path.
 /// With the `wgpu` feature enabled, returns the default WGPU device (Metal / Vulkan / DX12).
-/// Without `wgpu`, returns the NdArray CPU device.
+#[cfg(feature = "wgpu")]
 fn get_burn_device() -> <ActiveBackend as burn::tensor::backend::Backend>::Device {
     Default::default()
 }
 
 /// Download model files if missing, returning `(weights_path, config_path, tokenizer_path)`.
 /// Partial downloads are written to `*.tmp` and renamed atomically on completion.
+// Phase 2 will use this in the ort-cpu path; suppress dead_code in the interim.
+#[allow(dead_code)]
 async fn ensure_model_files(
     spec: &ModelSpec,
     cache_dir: &Path,
@@ -234,6 +274,8 @@ async fn ensure_model_files(
 
 /// Download a URL to `dest`, writing to `dest.tmp` first then renaming atomically.
 /// Streams the response body in chunks so large model files are never fully buffered.
+// Phase 2 will use this in the ort-cpu path; suppress dead_code in the interim.
+#[allow(dead_code)]
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
