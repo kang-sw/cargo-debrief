@@ -7,12 +7,19 @@ use indicatif::{ProgressBar, ProgressStyle};
 #[cfg(any(feature = "wgpu", feature = "ort-cpu"))]
 use tokenizers::Tokenizer;
 
-// Tokenizer configuration types used only in the wgpu (burn) inference path.
-#[cfg(feature = "wgpu")]
+// Tokenizer configuration types used by both wgpu and ort-cpu inference paths.
+#[cfg(any(feature = "wgpu", feature = "ort-cpu"))]
 use tokenizers::{PaddingParams, PaddingStrategy, TruncationParams, TruncationStrategy};
 
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu", feature = "ort-cpu"))]
 use std::sync::Mutex;
+
+#[cfg(feature = "ort-cpu")]
+use ort::{
+    ep,
+    session::{Session, builder::GraphOptimizationLevel},
+    value::Tensor,
+};
 
 #[cfg(feature = "wgpu")]
 use burn::prelude::Module;
@@ -78,14 +85,11 @@ pub struct Embedder {
     max_length: usize,
 }
 
-/// Placeholder Embedder for the ort-cpu build path.
-/// Inference implementation is filled in during Phase 2.
+/// Embedder backed by ONNX Runtime (CPU execution provider).
 #[cfg(feature = "ort-cpu")]
 pub struct Embedder {
-    // Phase 2 will use these fields; suppress dead_code until then.
-    #[allow(dead_code)]
+    session: Mutex<Session>,
     tokenizer: Tokenizer,
-    #[allow(dead_code)]
     max_length: usize,
 }
 
@@ -204,15 +208,135 @@ impl Embedder {
     }
 }
 
-/// ort-cpu stub implementation — filled in during Phase 2.
+/// ort-cpu inference implementation.
 #[cfg(feature = "ort-cpu")]
 impl Embedder {
-    pub async fn load(_model_name: &str, _cache_dir: &Path) -> Result<Self> {
-        unimplemented!("ort-cpu embedder load: Phase 2 not yet implemented")
+    pub async fn load(model_name: &str, cache_dir: &Path) -> Result<Self> {
+        let spec = ModelRegistry::lookup(model_name)
+            .with_context(|| format!("unknown model: {model_name}"))?;
+
+        let (onnx_file, _config_file, tokenizer_file) =
+            ensure_model_files(&spec, cache_dir).await?;
+
+        let cpu_ep = ep::CPU::default().build();
+        let session = Session::builder()
+            .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?
+            .with_execution_providers([cpu_ep])
+            .map_err(|e| anyhow::anyhow!("failed to register CPU EP: {e}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
+            .commit_from_file(&onnx_file)
+            .with_context(|| format!("failed to load ONNX model from {}", onnx_file.display()))?;
+
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_file)
+            .map_err(|e| anyhow::anyhow!("failed to load tokenizer: {e}"))?;
+
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: spec.max_length,
+                strategy: TruncationStrategy::LongestFirst,
+                ..Default::default()
+            }))
+            .map_err(|e| anyhow::anyhow!("failed to configure truncation: {e}"))?;
+
+        tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            ..Default::default()
+        }));
+
+        Ok(Self {
+            session: Mutex::new(session),
+            tokenizer,
+            max_length: spec.max_length,
+        })
     }
 
-    pub fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        unimplemented!("ort-cpu embed_batch: Phase 2 not yet implemented")
+    pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let encodings = self
+            .tokenizer
+            .encode_batch(texts.to_vec(), true)
+            .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
+
+        let batch_size = encodings.len();
+        let seq_len = encodings
+            .iter()
+            .map(|e| e.get_ids().len())
+            .max()
+            .unwrap_or(0)
+            .min(self.max_length);
+
+        let mut input_ids_data = vec![0i64; batch_size * seq_len];
+        let mut attention_mask_data = vec![0i64; batch_size * seq_len];
+
+        for (b, enc) in encodings.iter().enumerate() {
+            let ids = enc.get_ids();
+            let mask = enc.get_attention_mask();
+            let len = ids.len().min(seq_len);
+            for s in 0..len {
+                input_ids_data[b * seq_len + s] = ids[s] as i64;
+                attention_mask_data[b * seq_len + s] = mask[s] as i64;
+            }
+        }
+
+        let shape = [batch_size, seq_len];
+        let input_ids_tensor = Tensor::<i64>::from_array((shape, input_ids_data.clone()))
+            .context("failed to create input_ids tensor")?;
+        let attention_mask_tensor = Tensor::<i64>::from_array((shape, attention_mask_data.clone()))
+            .context("failed to create attention_mask tensor")?;
+
+        let mut session = self.session.lock().unwrap();
+        let outputs = session
+            .run(ort::inputs![
+                "input_ids" => input_ids_tensor,
+                "attention_mask" => attention_mask_tensor,
+            ])
+            .context("ONNX session run failed")?;
+
+        let output_val = &outputs["last_hidden_state"];
+        let (out_shape, data) = output_val
+            .try_extract_tensor::<f32>()
+            .context("failed to extract last_hidden_state tensor")?;
+
+        // Shape: [batch_size, seq_len, embedding_dim]
+        let embedding_dim = out_shape[2] as usize;
+        debug_assert_eq!(out_shape[0] as usize, batch_size);
+        debug_assert_eq!(out_shape[1] as usize, seq_len);
+
+        let mut result = Vec::with_capacity(batch_size);
+        for b in 0..batch_size {
+            let mut sum = vec![0.0f32; embedding_dim];
+            let mut weight_sum = 0.0f32;
+
+            for s in 0..seq_len {
+                if attention_mask_data[b * seq_len + s] == 0 {
+                    continue;
+                }
+                weight_sum += 1.0;
+                let offset = b * seq_len * embedding_dim + s * embedding_dim;
+                for h in 0..embedding_dim {
+                    sum[h] += data[offset + h];
+                }
+            }
+
+            let weight_sum = if weight_sum == 0.0 { 1e-9 } else { weight_sum };
+            for h in 0..embedding_dim {
+                sum[h] /= weight_sum;
+            }
+
+            // L2 normalize
+            let norm = sum.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+            for h in 0..embedding_dim {
+                sum[h] /= norm;
+            }
+
+            result.push(sum);
+        }
+
+        Ok(result)
     }
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -231,25 +355,33 @@ fn get_burn_device() -> <ActiveBackend as burn::tensor::backend::Backend>::Devic
 }
 
 /// Download model files if missing, returning `(weights_path, config_path, tokenizer_path)`.
+/// Files are placed under `cache_dir/<model-name>/<backend>/` where backend is `"burn"` for wgpu
+/// and `"ort"` for ort-cpu. The weights file is `model.safetensors` (wgpu) or `model.onnx` (ort-cpu).
 /// Partial downloads are written to `*.tmp` and renamed atomically on completion.
-// Phase 2 will use this in the ort-cpu path; suppress dead_code in the interim.
-#[allow(dead_code)]
 async fn ensure_model_files(
     spec: &ModelSpec,
     cache_dir: &Path,
 ) -> Result<(PathBuf, PathBuf, PathBuf)> {
-    let model_dir = cache_dir.join(spec.name);
+    #[cfg(feature = "wgpu")]
+    let (backend_subdir, weights_filename, weights_url_path) =
+        ("burn", "model.safetensors", spec.weights_path);
+
+    #[cfg(feature = "ort-cpu")]
+    let (backend_subdir, weights_filename, weights_url_path) =
+        ("ort", "model.onnx", "onnx/model.onnx");
+
+    let model_dir = cache_dir.join(spec.name).join(backend_subdir);
     std::fs::create_dir_all(&model_dir)
         .with_context(|| format!("failed to create model cache dir {}", model_dir.display()))?;
 
-    let weights_dest = model_dir.join("model.safetensors");
+    let weights_dest = model_dir.join(weights_filename);
     let config_dest = model_dir.join("config.json");
     let tokenizer_dest = model_dir.join("tokenizer.json");
 
     let base_url = format!("https://huggingface.co/{}/resolve/main", spec.hf_repo);
 
     if !weights_dest.exists() {
-        let url = format!("{base_url}/{}", spec.weights_path);
+        let url = format!("{base_url}/{weights_url_path}");
         download_file(&url, &weights_dest)
             .await
             .with_context(|| format!("failed to download weights from {url}"))?;
@@ -274,8 +406,6 @@ async fn ensure_model_files(
 
 /// Download a URL to `dest`, writing to `dest.tmp` first then renaming atomically.
 /// Streams the response body in chunks so large model files are never fully buffered.
-// Phase 2 will use this in the ort-cpu path; suppress dead_code in the interim.
-#[allow(dead_code)]
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
