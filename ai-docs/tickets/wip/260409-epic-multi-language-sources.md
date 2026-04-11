@@ -9,6 +9,8 @@ related:
   - 260404-feat-dependency-chunking      # existing all-deps approach, to be superseded
 skeletons:
   all-phases: 4a494f3
+plans:
+  phase-1: ai-docs/plans/2026-04/11-1500.multi-language-sources.md
 ---
 
 # Multi-Language Source Registration
