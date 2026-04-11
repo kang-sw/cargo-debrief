@@ -6,11 +6,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
 
-const INDEX_VERSION: u32 = 6;
+const INDEX_VERSION: u32 = 7;
+
+/// Identifies which embedding backend produced this index.
+/// On load, a mismatch triggers re-indexing to avoid mixing embeddings
+/// from different backends in the same HNSW index.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendTag {
+    Wgpu,
+    OrtCpu,
+}
+
+#[cfg(feature = "wgpu")]
+pub const fn current_backend() -> BackendTag {
+    BackendTag::Wgpu
+}
+
+#[cfg(feature = "ort-cpu")]
+pub const fn current_backend() -> BackendTag {
+    BackendTag::OrtCpu
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct IndexData {
     version: u32,
+    backend: BackendTag,
     pub last_indexed_commit: Option<String>,
     pub embedding_model: Option<String>,
     pub chunks: HashMap<PathBuf, Vec<Chunk>>,
@@ -20,6 +40,7 @@ impl IndexData {
     pub fn new() -> Self {
         Self {
             version: INDEX_VERSION,
+            backend: current_backend(),
             last_indexed_commit: None,
             embedding_model: None,
             chunks: HashMap::new(),
@@ -38,15 +59,22 @@ pub fn save_index(path: &Path, data: &IndexData) -> Result<()> {
 }
 
 /// Load the index from disk.
-/// Returns `Ok(None)` if the file doesn't exist or the version doesn't match `INDEX_VERSION`.
-/// I/O or deserialization errors are returned as `Err`.
+/// Returns `Ok(None)` if the file doesn't exist, can't be deserialized (e.g. layout from an
+/// older version), the version doesn't match `INDEX_VERSION`, or the backend tag doesn't match
+/// the current build's backend. I/O errors are returned as `Err`.
 pub fn load_index(path: &Path) -> Result<Option<IndexData>> {
     if !path.exists() {
         return Ok(None);
     }
     let bytes = std::fs::read(path)?;
-    let data: IndexData = bincode::deserialize(&bytes)?;
+    let data: IndexData = match bincode::deserialize(&bytes) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
     if data.version != INDEX_VERSION {
+        return Ok(None);
+    }
+    if data.backend != current_backend() {
         return Ok(None);
     }
     Ok(Some(data))
@@ -56,11 +84,12 @@ pub fn load_index(path: &Path) -> Result<Option<IndexData>> {
 // Dependency index
 // ---------------------------------------------------------------------------
 
-const DEPS_INDEX_VERSION: u32 = 3;
+const DEPS_INDEX_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub struct DepsIndexData {
     version: u32,
+    backend: BackendTag,
     pub cargo_lock_hash: Option<String>,
     pub chunks: Vec<Chunk>,
 }
@@ -69,6 +98,7 @@ impl DepsIndexData {
     pub fn new() -> Self {
         Self {
             version: DEPS_INDEX_VERSION,
+            backend: current_backend(),
             cargo_lock_hash: None,
             chunks: vec![],
         }
@@ -92,15 +122,22 @@ pub fn save_deps_index(path: &Path, data: &DepsIndexData) -> Result<()> {
 }
 
 /// Load the dependency index from disk.
-/// Returns `Ok(None)` if the file doesn't exist or the version doesn't match `DEPS_INDEX_VERSION`.
-/// I/O or deserialization errors are returned as `Err`.
+/// Returns `Ok(None)` if the file doesn't exist, can't be deserialized (e.g. layout from an
+/// older version), the version doesn't match `DEPS_INDEX_VERSION`, or the backend tag doesn't
+/// match the current build's backend. I/O errors are returned as `Err`.
 pub fn load_deps_index(path: &Path) -> Result<Option<DepsIndexData>> {
     if !path.exists() {
         return Ok(None);
     }
     let bytes = std::fs::read(path)?;
-    let data: DepsIndexData = bincode::deserialize(&bytes)?;
+    let data: DepsIndexData = match bincode::deserialize(&bytes) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
     if data.version != DEPS_INDEX_VERSION {
+        return Ok(None);
+    }
+    if data.backend != current_backend() {
         return Ok(None);
     }
     Ok(Some(data))
@@ -181,6 +218,26 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// Verifies that an index produced by a different backend is treated as stale.
+    /// Gated on wgpu because it hard-codes OrtCpu as the "other" backend.
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn backend_mismatch_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.bin");
+
+        // Construct an index with the opposite backend (OrtCpu) and save it.
+        let fake = IndexData {
+            backend: BackendTag::OrtCpu,
+            ..IndexData::new()
+        };
+        save_index(&path, &fake).unwrap();
+
+        // Loading under the wgpu build should detect the backend mismatch and return None.
+        let result = load_index(&path).unwrap();
+        assert!(result.is_none(), "backend mismatch should return None");
+    }
+
     #[test]
     fn parent_directory_creation() {
         let dir = tempfile::tempdir().unwrap();
@@ -215,5 +272,23 @@ mod tests {
 
         let result = load_deps_index(&path).unwrap();
         assert!(result.is_none(), "wrong version should return None");
+    }
+
+    /// Verifies that a deps index produced by a different backend is treated as stale.
+    /// Gated on wgpu because it hard-codes OrtCpu as the "other" backend.
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn deps_backend_mismatch_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deps-index.bin");
+
+        let fake = DepsIndexData {
+            backend: BackendTag::OrtCpu,
+            ..DepsIndexData::new()
+        };
+        save_deps_index(&path, &fake).unwrap();
+
+        let result = load_deps_index(&path).unwrap();
+        assert!(result.is_none(), "deps backend mismatch should return None");
     }
 }
