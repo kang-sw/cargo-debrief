@@ -15,8 +15,8 @@ CLI-first with a lazy-spawned background daemon for index serving.
 
 ## Tech Stack
 
-Rust (2024 edition). Key libs: tree-sitter, ort (ONNX Runtime), clap, serde,
-tokio.
+Rust (2024 edition). Key libs: tree-sitter, burn+wgpu (GPU embedding, default),
+ort (ONNX Runtime, CPU-only build via `--features ort-cpu`), clap, serde, tokio.
 
 ## Workspace
 
@@ -173,3 +173,4 @@ Tickets: `260404-feat-llm-chunk-summarization` (E),
 - burn NomicBERT implementation (epic child ticket 1): `src/nomic_bert_burn.rs` (517 LOC), BurnNomicBert EmbedderModel variant, `wgpu` feature flag, burn-store safetensors loading with PyTorchToBurnAdapter. Candle path preserved as parallel backend. INDEX_VERSION 6, DEPS_INDEX_VERSION 3. Review finding: partial RoPE assert guard added.
 - C++ chunker ticket created (`260405-feat-cpp-chunker`): tree-sitter-based best-effort C/C++ chunking. Accepted preprocessor limitations. Validation target: ASIO headers.
 - C++ deps discovery ticket created (`260405-feat-cpp-deps-discovery`): vcxproj/CMake parsing + recursive `#include` resolution. `.sln` auto-discovery with project name in embedding text. No depth limits — scale via GPU.
+- ort CPU revival Phase 1 (`260411-refactor-ort-cpu-revival`): NdArray CPU path proven unviable (~9× slower than ort, OOM-prone). Decided to bring ort back as the CPU-only build path. Phase 1 landed: `ort = "=2.0.0-rc.12"` optional dep, new `ort-cpu` cargo feature, burn/burn-store made optional (wgpu feature only), `compile_error!` mutual-exclusion guard in lib.rs. Two valid build configs: default `wgpu` (GPU) and `--no-default-features --features ort-cpu` (CPU). ort-cpu Embedder is a stub; Phases 2–5 (inference, index backend tag, NdArray removal, validation) pending.
