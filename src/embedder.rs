@@ -283,7 +283,7 @@ impl Embedder {
         }
 
         let shape = [batch_size, seq_len];
-        let input_ids_tensor = Tensor::<i64>::from_array((shape, input_ids_data.clone()))
+        let input_ids_tensor = Tensor::<i64>::from_array((shape, input_ids_data))
             .context("failed to create input_ids tensor")?;
         let attention_mask_tensor = Tensor::<i64>::from_array((shape, attention_mask_data.clone()))
             .context("failed to create attention_mask tensor")?;
