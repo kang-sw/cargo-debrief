@@ -171,12 +171,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "atomic_float"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "628d228f918ac3b82fe590352cc719d30664a0c13ca3a60266fe02c7132d480a"
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -310,7 +304,6 @@ checksum = "194141a65d74cf81579d13a2c956447509ceb20e4032af7d34f9d7ecc68ef2d3"
 dependencies = [
  "burn-core",
  "burn-dispatch",
- "burn-ndarray",
  "burn-nn",
  "burn-optim",
  "burn-store",
@@ -405,7 +398,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4bef057c1ee1b63c60d78890d0980bb4e6906a15837671cccbcba2ca607db2b3"
 dependencies = [
  "burn-backend",
- "burn-ndarray",
  "burn-wgpu",
  "paste",
 ]
@@ -419,27 +411,6 @@ dependencies = [
  "burn-backend",
  "hashbrown 0.16.1",
  "serde",
-]
-
-[[package]]
-name = "burn-ndarray"
-version = "0.21.0-pre.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e21ae84db1162cb52f871bd740de6427a0cb27e105bf256417fcb3e132dfbd67"
-dependencies = [
- "atomic_float",
- "burn-backend",
- "burn-ir",
- "burn-std",
- "const-random",
- "libm",
- "matrixmultiply",
- "ndarray",
- "num-traits",
- "paste",
- "portable-atomic",
- "portable-atomic-util",
- "rand 0.10.0",
 ]
 
 [[package]]
@@ -843,26 +814,6 @@ dependencies = [
  "once_cell",
  "unicode-width",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "const-random"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
-dependencies = [
- "const-random-macro",
-]
-
-[[package]]
-name = "const-random-macro"
-version = "0.1.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
-dependencies = [
- "getrandom 0.2.17",
- "once_cell",
- "tiny-keccak",
 ]
 
 [[package]]
@@ -4612,15 +4563,6 @@ name = "time-core"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
-
-[[package]]
-name = "tiny-keccak"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
-dependencies = [
- "crunchy",
-]
 
 [[package]]
 name = "tinystr"
