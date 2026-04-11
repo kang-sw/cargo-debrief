@@ -20,7 +20,11 @@ struct Cli {
 enum Command {
     /// Perform a manual full re-index of the codebase (normally implicit)
     #[command(name = "rebuild-index")]
-    RebuildIndex,
+    RebuildIndex {
+        /// Skip dependency indexing
+        #[arg(long)]
+        no_deps: bool,
+    },
     /// Search indexed code chunks
     Search {
         /// Search query
@@ -98,8 +102,10 @@ async fn main() -> Result<()> {
     let service = resolve_service(&project_root);
 
     match cli.command {
-        Command::RebuildIndex => {
-            let result = service.index(&project_root, &project_root).await?;
+        Command::RebuildIndex { no_deps } => {
+            let result = service
+                .index(&project_root, &project_root, !no_deps)
+                .await?;
             println!(
                 "Indexed {} files, {} chunks created.",
                 result.files_indexed, result.chunks_created

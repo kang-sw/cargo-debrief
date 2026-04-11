@@ -16,6 +16,7 @@ pub enum DaemonRequest {
     Status,
     Index {
         path: PathBuf,
+        include_deps: bool,
     },
     Search {
         query: String,
@@ -186,11 +187,13 @@ mod tests {
     fn roundtrip_index_request() {
         let req = DaemonRequest::Index {
             path: PathBuf::from("/some/path"),
+            include_deps: false,
         };
         let got: DaemonRequest = roundtrip(&req);
         match got {
-            DaemonRequest::Index { path } => {
+            DaemonRequest::Index { path, include_deps } => {
                 assert_eq!(path, PathBuf::from("/some/path"));
+                assert!(!include_deps);
             }
             _ => panic!("unexpected variant"),
         }

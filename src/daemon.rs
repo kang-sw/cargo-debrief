@@ -101,7 +101,10 @@ async fn handle_request(
             pid: std::process::id(),
             uptime_secs: start_time.elapsed().as_secs(),
         },
-        DaemonRequest::Index { ref path } => match service.index(project_root, path).await {
+        DaemonRequest::Index {
+            ref path,
+            include_deps,
+        } => match service.index(project_root, path, include_deps).await {
             Ok(result) => DaemonResponse::IndexResult(result),
             Err(e) => DaemonResponse::Error {
                 message: format!("{e:#}"),

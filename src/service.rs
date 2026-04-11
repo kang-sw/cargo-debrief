@@ -65,6 +65,7 @@ pub trait DebriefService {
         &self,
         project_root: &Path,
         path: &Path,
+        include_deps: bool,
     ) -> impl Future<Output = Result<IndexResult>> + Send;
 
     fn search(
@@ -519,7 +520,12 @@ async fn ensure_deps_index_fresh(
 // ---------------------------------------------------------------------------
 
 impl DebriefService for InProcessService {
-    async fn index(&self, project_root: &Path, _path: &Path) -> Result<IndexResult> {
+    async fn index(
+        &self,
+        project_root: &Path,
+        _path: &Path,
+        include_deps: bool,
+    ) -> Result<IndexResult> {
         let config = load_config(&config_paths(project_root))?;
         let model_name = config
             .embedding_model
@@ -531,7 +537,9 @@ impl DebriefService for InProcessService {
         // eprintln!("[index] starting project index...");
         let (_data, result) = run_index(project_root, None, None, &embedder).await?;
         // eprintln!("[index] project index done. Starting deps index...");
-        run_deps_index(project_root, &embedder).await?;
+        if include_deps {
+            run_deps_index(project_root, &embedder).await?;
+        }
         // eprintln!("[index] deps index done.");
         Ok(result)
     }
@@ -732,10 +740,16 @@ impl DaemonClient {
 }
 
 impl DebriefService for DaemonClient {
-    async fn index(&self, _project_root: &Path, path: &Path) -> Result<IndexResult> {
+    async fn index(
+        &self,
+        _project_root: &Path,
+        path: &Path,
+        include_deps: bool,
+    ) -> Result<IndexResult> {
         use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
         match self.send(DaemonRequest::Index {
             path: path.to_path_buf(),
+            include_deps,
         })? {
             DaemonResponse::IndexResult(r) => Ok(r),
             DaemonResponse::Error { message } => anyhow::bail!("{message}"),
@@ -825,14 +839,21 @@ impl Service {
 }
 
 impl DebriefService for Service {
-    async fn index(&self, project_root: &Path, path: &Path) -> Result<IndexResult> {
+    async fn index(
+        &self,
+        project_root: &Path,
+        path: &Path,
+        include_deps: bool,
+    ) -> Result<IndexResult> {
         if let Some(d) = &self.daemon {
-            match d.index(project_root, path).await {
+            match d.index(project_root, path, include_deps).await {
                 Ok(r) => return Ok(r),
                 Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
             }
         }
-        self.in_process.index(project_root, path).await
+        self.in_process
+            .index(project_root, path, include_deps)
+            .await
     }
 
     async fn search(
