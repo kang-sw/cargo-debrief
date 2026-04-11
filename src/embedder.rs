@@ -287,12 +287,17 @@ impl Embedder {
             .context("failed to create input_ids tensor")?;
         let attention_mask_tensor = Tensor::<i64>::from_array((shape, attention_mask_data.clone()))
             .context("failed to create attention_mask tensor")?;
+        // token_type_ids: all zeros — BERT single-segment convention.
+        let token_type_ids_tensor =
+            Tensor::<i64>::from_array((shape, vec![0i64; batch_size * seq_len]))
+                .context("failed to create token_type_ids tensor")?;
 
         let mut session = self.session.lock().unwrap();
         let outputs = session
             .run(ort::inputs![
                 "input_ids" => input_ids_tensor,
                 "attention_mask" => attention_mask_tensor,
+                "token_type_ids" => token_type_ids_tensor,
             ])
             .context("ONNX session run failed")?;
 
