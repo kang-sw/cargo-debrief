@@ -59,15 +59,18 @@ pub fn save_index(path: &Path, data: &IndexData) -> Result<()> {
 }
 
 /// Load the index from disk.
-/// Returns `Ok(None)` if the file doesn't exist, the version doesn't match `INDEX_VERSION`,
-/// or the backend tag doesn't match the current build's backend.
-/// I/O or deserialization errors are returned as `Err`.
+/// Returns `Ok(None)` if the file doesn't exist, can't be deserialized (e.g. layout from an
+/// older version), the version doesn't match `INDEX_VERSION`, or the backend tag doesn't match
+/// the current build's backend. I/O errors are returned as `Err`.
 pub fn load_index(path: &Path) -> Result<Option<IndexData>> {
     if !path.exists() {
         return Ok(None);
     }
     let bytes = std::fs::read(path)?;
-    let data: IndexData = bincode::deserialize(&bytes)?;
+    let data: IndexData = match bincode::deserialize(&bytes) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
     if data.version != INDEX_VERSION {
         return Ok(None);
     }
@@ -119,15 +122,18 @@ pub fn save_deps_index(path: &Path, data: &DepsIndexData) -> Result<()> {
 }
 
 /// Load the dependency index from disk.
-/// Returns `Ok(None)` if the file doesn't exist, the version doesn't match `DEPS_INDEX_VERSION`,
-/// or the backend tag doesn't match the current build's backend.
-/// I/O or deserialization errors are returned as `Err`.
+/// Returns `Ok(None)` if the file doesn't exist, can't be deserialized (e.g. layout from an
+/// older version), the version doesn't match `DEPS_INDEX_VERSION`, or the backend tag doesn't
+/// match the current build's backend. I/O errors are returned as `Err`.
 pub fn load_deps_index(path: &Path) -> Result<Option<DepsIndexData>> {
     if !path.exists() {
         return Ok(None);
     }
     let bytes = std::fs::read(path)?;
-    let data: DepsIndexData = bincode::deserialize(&bytes)?;
+    let data: DepsIndexData = match bincode::deserialize(&bytes) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
     if data.version != DEPS_INDEX_VERSION {
         return Ok(None);
     }
@@ -266,5 +272,23 @@ mod tests {
 
         let result = load_deps_index(&path).unwrap();
         assert!(result.is_none(), "wrong version should return None");
+    }
+
+    /// Verifies that a deps index produced by a different backend is treated as stale.
+    /// Gated on wgpu because it hard-codes OrtCpu as the "other" backend.
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn deps_backend_mismatch_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deps-index.bin");
+
+        let fake = DepsIndexData {
+            backend: BackendTag::OrtCpu,
+            ..DepsIndexData::new()
+        };
+        save_deps_index(&path, &fake).unwrap();
+
+        let result = load_deps_index(&path).unwrap();
+        assert!(result.is_none(), "deps backend mismatch should return None");
     }
 }
