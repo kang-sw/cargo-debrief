@@ -32,6 +32,12 @@ Same merge-branch requirement applies inside the nested `Config::merge` arm for 
 
 Use `load_layer_single(path)?.unwrap_or_default()` to read the existing layer (or start empty), mutate the specific field, then `save_config(path, &config)`. `save_config` creates parent directories automatically and serializes `None` fields as absent TOML keys. Do not call `load_config` (multi-layer merge) when you only intend to write a single layer — that would collapse all layers into one file.
 
+**Source registration helpers:**
+
+- `resolve_sources(project_root)` is the read path. If the merged config has a non-empty `sources` list, it returns that. Otherwise it falls back to the Cargo.toml auto-detection (`Cargo.toml` present → single `Language::Rust` source with `root = "."`), which keeps the pre-`[[sources]]` flow working without an explicit `cargo debrief add rust`.
+- `append_source(project_root, entry)` and `remove_source_at(project_root, index)` write the **project layer** in isolation via `load_layer_single → mutate → save_config`. They never touch the global or local layer. Both fail with a clear error message if `config_paths(project_root).project` is `None` — the worktree/submodule limitation below applies.
+- `remove_source_at` bounds-checks `index` against the current source count and bails on overflow with `"source index {index} out of range (have {n} entries)"`. Removing the last entry leaves `sources = []` written to disk; the config file is never deleted by the helper.
+
 ## Common Mistakes
 
 - **Missing merge branch for a new field.** If `Config::merge` is not updated when a new field is added, higher-priority layers (project, local) silently have no effect on that field. No error is raised.

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::Chunk;
 
-const INDEX_VERSION: u32 = 7;
+const INDEX_VERSION: u32 = 8;
 
 /// Identifies which embedding backend produced this index.
 /// On load, a mismatch triggers re-indexing to avoid mixing embeddings
@@ -72,69 +72,6 @@ pub fn load_index(path: &Path) -> Result<Option<IndexData>> {
         Err(_) => return Ok(None),
     };
     if data.version != INDEX_VERSION {
-        return Ok(None);
-    }
-    if data.backend != current_backend() {
-        return Ok(None);
-    }
-    Ok(Some(data))
-}
-
-// ---------------------------------------------------------------------------
-// Dependency index
-// ---------------------------------------------------------------------------
-
-const DEPS_INDEX_VERSION: u32 = 4;
-
-#[derive(Serialize, Deserialize)]
-pub struct DepsIndexData {
-    version: u32,
-    backend: BackendTag,
-    pub cargo_lock_hash: Option<String>,
-    pub chunks: Vec<Chunk>,
-}
-
-impl DepsIndexData {
-    pub fn new() -> Self {
-        Self {
-            version: DEPS_INDEX_VERSION,
-            backend: current_backend(),
-            cargo_lock_hash: None,
-            chunks: vec![],
-        }
-    }
-}
-
-impl Default for DepsIndexData {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Save the dependency index to disk. Creates parent directories if they don't exist.
-pub fn save_deps_index(path: &Path, data: &DepsIndexData) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let bytes = bincode::serialize(data)?;
-    std::fs::write(path, bytes)?;
-    Ok(())
-}
-
-/// Load the dependency index from disk.
-/// Returns `Ok(None)` if the file doesn't exist, can't be deserialized (e.g. layout from an
-/// older version), the version doesn't match `DEPS_INDEX_VERSION`, or the backend tag doesn't
-/// match the current build's backend. I/O errors are returned as `Err`.
-pub fn load_deps_index(path: &Path) -> Result<Option<DepsIndexData>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(path)?;
-    let data: DepsIndexData = match bincode::deserialize(&bytes) {
-        Ok(d) => d,
-        Err(_) => return Ok(None),
-    };
-    if data.version != DEPS_INDEX_VERSION {
         return Ok(None);
     }
     if data.backend != current_backend() {
@@ -246,49 +183,5 @@ mod tests {
 
         save_index(&path, &IndexData::new()).unwrap();
         assert!(path.exists());
-    }
-
-    #[test]
-    fn test_deps_index_staleness_check() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("deps-index.bin");
-
-        let mut data = DepsIndexData::new();
-        data.cargo_lock_hash = Some("deadbeefcafe0000".to_string());
-        data.chunks.push(sample_chunk("dep_fn"));
-
-        save_deps_index(&path, &data).unwrap();
-        let loaded = load_deps_index(&path).unwrap().expect("expected Some");
-
-        assert_eq!(loaded.cargo_lock_hash.as_deref(), Some("deadbeefcafe0000"));
-        assert_eq!(loaded.chunks.len(), 1);
-        assert_eq!(loaded.chunks[0].metadata.symbol_name, "dep_fn");
-
-        // Overwrite the first 4 bytes with a wrong version.
-        let mut bytes = std::fs::read(&path).unwrap();
-        let bad_version: u32 = 999;
-        bytes[..4].copy_from_slice(&bad_version.to_le_bytes());
-        std::fs::write(&path, &bytes).unwrap();
-
-        let result = load_deps_index(&path).unwrap();
-        assert!(result.is_none(), "wrong version should return None");
-    }
-
-    /// Verifies that a deps index produced by a different backend is treated as stale.
-    /// Gated on wgpu because it hard-codes OrtCpu as the "other" backend.
-    #[cfg(feature = "wgpu")]
-    #[test]
-    fn deps_backend_mismatch_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("deps-index.bin");
-
-        let fake = DepsIndexData {
-            backend: BackendTag::OrtCpu,
-            ..DepsIndexData::new()
-        };
-        save_deps_index(&path, &fake).unwrap();
-
-        let result = load_deps_index(&path).unwrap();
-        assert!(result.is_none(), "deps backend mismatch should return None");
     }
 }

@@ -245,14 +245,35 @@ pub fn resolve_sources(project_root: &Path) -> Result<Vec<SourceEntry>> {
 /// Append a new source entry to the project config. Creates the project
 /// config file if it does not exist.
 ///
-/// Skeleton: unimplemented. Wired in during Phase 1 implementation.
-pub fn append_source(_project_root: &Path, _entry: SourceEntry) -> Result<()> {
-    todo!("append_source: load project config, push SourceEntry, save_config")
+/// Writes the project layer in isolation via `load_layer_single` →
+/// mutate → `save_config`. Other layers are not touched.
+pub fn append_source(project_root: &Path, entry: SourceEntry) -> Result<()> {
+    let path = config_paths(project_root).project.context(
+        "not inside a git repository; cannot write project config (worktrees and \
+         submodules where `.git` is a file are not supported — see \
+         mental-model/config.md)",
+    )?;
+    let mut config = load_layer_single(&path)?.unwrap_or_default();
+    config.sources.push(entry);
+    save_config(&path, &config)
 }
 
 /// Remove the source entry at `index` from the project config.
 ///
-/// Skeleton: unimplemented. Wired in during Phase 1 implementation.
-pub fn remove_source_at(_project_root: &Path, _index: usize) -> Result<()> {
-    todo!("remove_source_at: load project config, validate index, remove, save_config")
+/// Bounds-checks `index` against the current source count. An empty
+/// source list after removal still results in `sources = []` being
+/// written; the config file is never deleted.
+pub fn remove_source_at(project_root: &Path, index: usize) -> Result<()> {
+    let path = config_paths(project_root).project.context(
+        "not inside a git repository; cannot write project config (worktrees and \
+         submodules where `.git` is a file are not supported — see \
+         mental-model/config.md)",
+    )?;
+    let mut config = load_layer_single(&path)?.unwrap_or_default();
+    let n = config.sources.len();
+    if index >= n {
+        anyhow::bail!("source index {index} out of range (have {n} entries)");
+    }
+    config.sources.remove(index);
+    save_config(&path, &config)
 }

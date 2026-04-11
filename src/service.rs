@@ -1,28 +1,40 @@
 //! Service boundary between CLI and core logic.
 //!
-//! Skeleton rewrite for the multi-language sources epic
-//! (`260409-epic-multi-language-sources`). The full config-driven
-//! pipeline lands during Phase 1 implementation; the bodies below are
-//! `todo!()` placeholders anchoring the public contract.
+//! Phase 1 of the multi-language sources epic
+//! (`260409-epic-multi-language-sources`). The indexing pipeline is now
+//! driven by the `[[sources]]` list resolved from `config.toml` (or the
+//! Cargo.toml backward-compat fallback). The legacy
+//! `run_index`/`run_deps_index`/`ensure_*_fresh` helpers are gone — they
+//! are replaced by `load_or_rebuild_index` and `run_index_for_sources`.
 //!
-//! Preserved from the previous implementation:
-//! - `IndexResult` / `SearchResult` public types (wire format shared
-//!   with `ipc/protocol.rs` and `search.rs`).
-//! - The five existing `DebriefService` trait methods (daemon.rs and
-//!   the IPC protocol still dispatch through these — signatures
-//!   are frozen).
-//!
-//! New in this skeleton:
-//! - Three `DebriefService` methods for source registration
-//!   (`add_source`, `list_sources`, `remove_source`) backing the
-//!   new CLI subcommands. Config-only; no indexing.
+//! Behavioral notes:
+//! - Phase 1 stores a single merged project index containing chunks from
+//!   every `dep == false` source. `dep == true` entries are dropped with
+//!   a `tracing::warn!` and re-introduced in Phase 3.
+//! - Incremental rebuilds are intentionally absent in Phase 1: any
+//!   commit-hash mismatch triggers a full rebuild from scratch. This
+//!   sidesteps the bookkeeping needed when the resolved source set
+//!   itself changes between runs.
+//! - `--no-deps` and the `include_deps` parameter are kept for trait
+//!   stability but become no-ops, logged at `tracing::debug!`.
 
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tracing::{debug, info_span, warn};
 
-use crate::chunk::ChunkOrigin;
-use crate::config::{self, Language, SourceEntry};
+use crate::chunk::{Chunk, ChunkOrigin, ChunkType, Visibility};
+use crate::chunker::chunker_for;
+use crate::config::{self, Language, SourceEntry, config_paths, load_config, save_config};
+use crate::embedder::{Embedder, ModelRegistry};
+use crate::git;
+use crate::search::SearchIndex;
+use crate::store::{self, IndexData};
+
+/// Embedding batch size — must match the historical pipeline so peak
+/// memory and progress dot rate stay comparable.
+const EMBED_BATCH_SIZE: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -120,6 +132,308 @@ pub trait DebriefService {
 }
 
 // ---------------------------------------------------------------------------
+// Pipeline helpers (private free functions)
+// ---------------------------------------------------------------------------
+
+/// Compute the index file path: `.git/debrief/index.bin` under the git
+/// root. Walks parents like `daemon::daemon_dir`.
+fn index_path(project_root: &Path) -> Result<PathBuf> {
+    let mut current = project_root;
+    loop {
+        let candidate = current.join(".git");
+        if candidate.is_dir() {
+            return Ok(candidate.join("debrief").join("index.bin"));
+        }
+        current = current
+            .parent()
+            .context("not inside a git repository; cannot locate index path")?;
+    }
+}
+
+/// Construct an `Embedder` for the project's configured (or default)
+/// model. Returns the embedder and the canonical model name string —
+/// callers stamp the model name onto `IndexData::embedding_model` so
+/// staleness checks can detect future model changes.
+async fn build_embedder(project_root: &Path) -> Result<(Embedder, String)> {
+    let config = load_config(&config_paths(project_root))?;
+    let model_name = config
+        .embedding_model
+        .as_deref()
+        .unwrap_or(ModelRegistry::DEFAULT_MODEL)
+        .to_string();
+    // Validate the name resolves to a known model spec before downloading.
+    ModelRegistry::lookup(&model_name)
+        .with_context(|| format!("unknown embedding model in config: {model_name:?}"))?;
+
+    let cache_dir = dirs::data_dir()
+        .context("cannot determine user data directory (no home directory?)")?
+        .join("debrief")
+        .join("models");
+
+    let embedder = Embedder::load(&model_name, &cache_dir).await?;
+    Ok((embedder, model_name))
+}
+
+/// Default extension set for a language. Returned slice is `&'static`.
+fn default_extensions(language: Language) -> &'static [&'static str] {
+    match language {
+        Language::Rust => &["rs"],
+        Language::Cpp => &["cpp", "cc", "cxx", "c", "h", "hpp", "hxx", "hh"],
+    }
+}
+
+/// Lexically join `project_root` with `entry.root`, treating `"."` as
+/// `project_root` itself. Returns the project-relative root used as a
+/// prefix filter for git ls-files output.
+///
+/// Phase 1 keeps this purely lexical (no `canonicalize`) so the function
+/// is symlink-stable and unit-testable without filesystem access.
+fn entry_relative_root(entry_root: &Path) -> PathBuf {
+    if entry_root.as_os_str() == "." || entry_root.as_os_str().is_empty() {
+        PathBuf::new()
+    } else {
+        // Strip a leading `./` if present to keep prefix matches simple.
+        let stripped = entry_root.strip_prefix(".").unwrap_or(entry_root);
+        stripped.to_path_buf()
+    }
+}
+
+/// Test whether `relative` (a repo-relative path from `git ls-files`)
+/// lies under `root` (also repo-relative). An empty `root` matches every
+/// path. Otherwise the test is a path-component prefix match.
+fn path_under_root(relative: &Path, root: &Path) -> bool {
+    if root.as_os_str().is_empty() {
+        return true;
+    }
+    relative.starts_with(root)
+}
+
+/// Return the lowercased file extension of `path`, or `None` if absent.
+fn lowercase_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+}
+
+/// Resolve the on-disk index, performing a full rebuild whenever it is
+/// missing or stale.
+///
+/// Phase 1 staleness rules (binary; no incremental diffs):
+/// - Missing file → rebuild.
+/// - `embedding_model` differs from `current_model_name` → rebuild.
+/// - `last_indexed_commit` differs from current `git HEAD` → rebuild.
+/// - `force_full == true` → rebuild unconditionally.
+///
+/// If `git::head_commit` fails (e.g. empty repo with no HEAD), the
+/// commit field is treated as "always rebuild" and the resulting index
+/// stores `last_indexed_commit = None`.
+async fn load_or_rebuild_index(
+    project_root: &Path,
+    embedder: &Embedder,
+    model_name: &str,
+    force_full: bool,
+) -> Result<IndexData> {
+    let path = index_path(project_root)?;
+    let head = git::head_commit(project_root).ok();
+
+    if !force_full
+        && let Some(existing) = store::load_index(&path)?
+        && existing.embedding_model.as_deref() == Some(model_name)
+        && let Some(head_hash) = head.as_deref()
+        && existing.last_indexed_commit.as_deref() == Some(head_hash)
+    {
+        return Ok(existing);
+    }
+
+    let sources = config::resolve_sources(project_root)?;
+    let mut data = run_index_for_sources(project_root, &sources, embedder).await?;
+    data.last_indexed_commit = head;
+    data.embedding_model = Some(model_name.to_string());
+    store::save_index(&path, &data)?;
+    Ok(data)
+}
+
+/// Core indexing pipeline.
+///
+/// `sources` is the caller-resolved list (so tests can inject one).
+/// Returns an `IndexData` whose `chunks` map is populated; the caller
+/// (`load_or_rebuild_index`) stamps `last_indexed_commit` and
+/// `embedding_model` afterwards.
+async fn run_index_for_sources(
+    project_root: &Path,
+    sources: &[SourceEntry],
+    embedder: &Embedder,
+) -> Result<IndexData> {
+    let _root_span = info_span!("rebuild_index", project = %project_root.display()).entered();
+
+    if sources.is_empty() {
+        warn!("no sources registered; rebuild produced empty index");
+        return Ok(IndexData::new());
+    }
+
+    // Partition: drop dep sources with a structured warning, keep project sources.
+    let mut project_sources: Vec<&SourceEntry> = Vec::new();
+    for entry in sources {
+        if entry.dep {
+            warn!(
+                root = %entry.root.display(),
+                "dep sources are ignored in Phase 1 of ticket 260409; Phase 3 will implement \
+                 dependency indexing"
+            );
+        } else {
+            project_sources.push(entry);
+        }
+    }
+
+    // ---- File discovery ---------------------------------------------------
+    // Build (relative_path, language) pairs deduplicated across overlapping
+    // source roots. The first source registered wins on a language conflict.
+    let files: Vec<(PathBuf, Language)> = {
+        let _span = info_span!("file_discovery").entered();
+
+        let mut seen: HashMap<PathBuf, Language> = HashMap::new();
+        let mut order: Vec<PathBuf> = Vec::new();
+
+        // Single git ls-files call serves every source — Phase 1 is full
+        // rebuild only, so `from = None`.
+        let changes = git::changed_files(project_root, None)?;
+        let all_paths: Vec<PathBuf> = changes.added.iter().map(PathBuf::from).collect();
+
+        for entry in &project_sources {
+            let scoped_root = entry_relative_root(&entry.root);
+            let ext_set: HashSet<String> = entry
+                .extensions
+                .as_deref()
+                .map(|exts| exts.iter().map(|e| e.to_ascii_lowercase()).collect())
+                .unwrap_or_else(|| {
+                    default_extensions(entry.language)
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                });
+
+            for rel in &all_paths {
+                if !path_under_root(rel, &scoped_root) {
+                    continue;
+                }
+                let Some(ext) = lowercase_extension(rel) else {
+                    continue;
+                };
+                if !ext_set.contains(&ext) {
+                    continue;
+                }
+
+                match seen.get(rel) {
+                    None => {
+                        seen.insert(rel.clone(), entry.language);
+                        order.push(rel.clone());
+                    }
+                    Some(existing) if *existing == entry.language => {
+                        // silent unify — same-language duplicate
+                    }
+                    Some(existing) => {
+                        warn!(
+                            path = %rel.display(),
+                            kept = ?existing,
+                            dropped = ?entry.language,
+                            "file matched multiple sources with conflicting languages; \
+                             keeping the language registered first"
+                        );
+                    }
+                }
+            }
+        }
+
+        order
+            .into_iter()
+            .map(|p| {
+                let lang = seen[&p];
+                (p, lang)
+            })
+            .collect()
+    };
+
+    // ---- Chunking ---------------------------------------------------------
+    let mut per_file: HashMap<PathBuf, Vec<Chunk>> = HashMap::new();
+    {
+        let _span = info_span!("chunking", files = files.len()).entered();
+        for (relative, language) in &files {
+            let abs = project_root.join(relative);
+            let source = match std::fs::read_to_string(&abs) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(path = %abs.display(), error = %e, "failed to read source file; skipping");
+                    continue;
+                }
+            };
+            let chunker = chunker_for(language);
+            match chunker.chunk(relative, &source) {
+                Ok(chunks) => {
+                    per_file.insert(relative.clone(), chunks);
+                }
+                Err(e) => {
+                    warn!(
+                        path = %relative.display(),
+                        error = %e,
+                        "chunker failed; skipping file"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- Embedding --------------------------------------------------------
+    let total_chunks: usize = per_file.values().map(|v| v.len()).sum();
+    {
+        let _span = info_span!("embedding", chunks = total_chunks).entered();
+
+        // Collect mutable refs in stable iteration order so embeddings can
+        // be assigned by position after each batch.
+        let mut chunk_refs: Vec<&mut Chunk> =
+            per_file.values_mut().flat_map(|v| v.iter_mut()).collect();
+
+        if !chunk_refs.is_empty() {
+            use std::io::Write;
+            eprint!("indexing");
+            let _ = std::io::stderr().flush();
+
+            let mut start = 0usize;
+            while start < chunk_refs.len() {
+                let end = (start + EMBED_BATCH_SIZE).min(chunk_refs.len());
+                let texts: Vec<&str> = chunk_refs[start..end]
+                    .iter()
+                    .map(|c| c.embedding_text.as_str())
+                    .collect();
+                let embeddings = embedder.embed_batch(&texts)?;
+                for (chunk, emb) in chunk_refs[start..end].iter_mut().zip(embeddings) {
+                    chunk.embedding = Some(emb);
+                }
+                eprint!(".");
+                let _ = std::io::stderr().flush();
+                start = end;
+            }
+            eprintln!("\ndone. {total_chunks} chunks, {} files.", files.len());
+        } else {
+            eprintln!("indexing\ndone. 0 chunks, {} files.", files.len());
+        }
+    }
+
+    // ---- Index build ------------------------------------------------------
+    let mut data = {
+        let _span = info_span!("index_build").entered();
+        let mut data = IndexData::new();
+        data.chunks = per_file;
+        data
+    };
+    // `last_indexed_commit` and `embedding_model` are stamped by the
+    // caller — `run_index_for_sources` is intentionally agnostic about
+    // which commit/model the rebuild ran against.
+    data.last_indexed_commit = None;
+    data.embedding_model = None;
+    Ok(data)
+}
+
+// ---------------------------------------------------------------------------
 // InProcessService
 // ---------------------------------------------------------------------------
 
@@ -142,38 +456,123 @@ impl Default for InProcessService {
 impl DebriefService for InProcessService {
     async fn index(
         &self,
-        _project_root: &Path,
+        project_root: &Path,
         _path: &Path,
-        _include_deps: bool,
+        include_deps: bool,
     ) -> Result<IndexResult> {
-        todo!("InProcessService::index — config-driven pipeline lands in Phase 1")
+        if !include_deps {
+            debug!("`--no-deps` is a no-op in Phase 1 of ticket 260409");
+        } else {
+            debug!("`include_deps = true` is a no-op in Phase 1 of ticket 260409");
+        }
+        let (embedder, model_name) = build_embedder(project_root).await?;
+        let data = load_or_rebuild_index(project_root, &embedder, &model_name, true).await?;
+        let files_indexed = data.chunks.len();
+        let chunks_created = data.chunks.values().map(|v| v.len()).sum();
+        Ok(IndexResult {
+            files_indexed,
+            chunks_created,
+        })
     }
 
     async fn search(
         &self,
-        _project_root: &Path,
-        _query: &str,
-        _top_k: usize,
-        _include_deps: bool,
+        project_root: &Path,
+        query: &str,
+        top_k: usize,
+        include_deps: bool,
     ) -> Result<Vec<SearchResult>> {
-        todo!("InProcessService::search — config-driven pipeline lands in Phase 1")
+        if include_deps {
+            debug!("`include_deps = true` is a no-op in Phase 1 of ticket 260409");
+        }
+        let (embedder, model_name) = build_embedder(project_root).await?;
+        let data = load_or_rebuild_index(project_root, &embedder, &model_name, false).await?;
+
+        let flat: Vec<(PathBuf, Chunk)> = data
+            .chunks
+            .into_iter()
+            .flat_map(|(path, chunks)| chunks.into_iter().map(move |c| (path.clone(), c)))
+            .collect();
+
+        let search_index = SearchIndex::build(flat)?;
+        search_index.search(query, &embedder, top_k)
     }
 
-    async fn overview(&self, _project_root: &Path, _file: &Path) -> Result<String> {
-        todo!("InProcessService::overview — config-driven pipeline lands in Phase 1")
+    async fn overview(&self, project_root: &Path, file: &Path) -> Result<String> {
+        let (embedder, model_name) = build_embedder(project_root).await?;
+        let data = load_or_rebuild_index(project_root, &embedder, &model_name, false).await?;
+
+        // Normalize `file` to repo-relative form for index key lookup.
+        let file_key = if file.is_absolute() {
+            file.strip_prefix(project_root)
+                .with_context(|| {
+                    format!("{} is not under {}", file.display(), project_root.display())
+                })?
+                .to_path_buf()
+        } else {
+            file.to_path_buf()
+        };
+
+        let chunks = data
+            .chunks
+            .get(&file_key)
+            .ok_or_else(|| anyhow::anyhow!("no index entries for {}", file.display()))?;
+
+        let mut overview_chunks: Vec<&Chunk> = chunks
+            .iter()
+            .filter(|c| c.metadata.chunk_type == ChunkType::Overview)
+            .collect();
+
+        overview_chunks.sort_by_key(|c| match c.metadata.visibility {
+            Visibility::Pub => 0,
+            Visibility::PubCrate => 1,
+            Visibility::PubSuper => 2,
+            Visibility::Private => 3,
+        });
+
+        let overview_text: String = overview_chunks
+            .iter()
+            .map(|c| c.display_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        if overview_text.is_empty() {
+            anyhow::bail!("no overview chunks found for {}", file.display());
+        }
+        Ok(overview_text)
     }
 
     async fn dep_overview(&self, _project_root: &Path, _crate_name: &str) -> Result<String> {
-        todo!("InProcessService::dep_overview — dep indexing lands in Phase 3")
+        anyhow::bail!("dependency overview not yet available (Phase 3 of ticket 260409)")
     }
 
     async fn set_embedding_model(
         &self,
-        _project_root: &Path,
-        _model: &str,
-        _global: bool,
+        project_root: &Path,
+        model: &str,
+        global: bool,
     ) -> Result<()> {
-        todo!("InProcessService::set_embedding_model — wired during Phase 1")
+        ModelRegistry::lookup(model).with_context(|| {
+            format!(
+                "unknown embedding model: {model:?}. Use a known model name such as {:?}",
+                ModelRegistry::DEFAULT_MODEL
+            )
+        })?;
+
+        let paths = config_paths(project_root);
+        let target = if global {
+            paths
+                .global
+                .context("could not determine global config path (no home directory?)")?
+        } else {
+            paths
+                .project
+                .context("not inside a git repository; cannot write project config")?
+        };
+
+        let mut config = config::load_layer_single(&target)?.unwrap_or_default();
+        config.embedding_model = Some(model.to_string());
+        save_config(&target, &config)
     }
 
     async fn add_source(
@@ -193,9 +592,6 @@ impl DebriefService for InProcessService {
     }
 
     async fn list_sources(&self, project_root: &Path) -> Result<Vec<SourceEntry>> {
-        // Real implementation: honors the backward-compat Cargo.toml
-        // fallback so the skeleton integration test has something to
-        // exercise. See `config::resolve_sources`.
         config::resolve_sources(project_root)
     }
 
@@ -210,9 +606,12 @@ impl DebriefService for InProcessService {
 
 /// Client that communicates with a running daemon process via IPC.
 ///
-/// Skeleton: trait method bodies are `todo!()`. The connection helper
-/// is preserved because `daemon.rs` and `main.rs` import it and their
-/// code paths must compile.
+/// Phase 1: the five legacy methods dispatch via the existing IPC
+/// variants. Source registration (`add_source`/`list_sources`/
+/// `remove_source`) does not have an IPC variant yet — those methods
+/// `bail!`, which causes the surrounding `Service` wrapper to fall back
+/// to `InProcessService`. This is the path that owns the project config
+/// file anyway, so the fallback is semantically correct.
 pub struct DaemonClient {
     daemon_dir: std::path::PathBuf,
     timeout: std::time::Duration,
@@ -245,7 +644,6 @@ impl DaemonClient {
         })
     }
 
-    #[allow(dead_code)]
     fn send(
         &self,
         request: crate::ipc::protocol::DaemonRequest,
@@ -258,37 +656,76 @@ impl DebriefService for DaemonClient {
     async fn index(
         &self,
         _project_root: &Path,
-        _path: &Path,
-        _include_deps: bool,
+        path: &Path,
+        include_deps: bool,
     ) -> Result<IndexResult> {
-        todo!("DaemonClient::index — IPC dispatch rewired in Phase 1")
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::Index {
+            path: path.to_path_buf(),
+            include_deps,
+        })? {
+            DaemonResponse::IndexResult(r) => Ok(r),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+        }
     }
 
     async fn search(
         &self,
         _project_root: &Path,
-        _query: &str,
-        _top_k: usize,
-        _include_deps: bool,
+        query: &str,
+        top_k: usize,
+        include_deps: bool,
     ) -> Result<Vec<SearchResult>> {
-        todo!("DaemonClient::search — IPC dispatch rewired in Phase 1")
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::Search {
+            query: query.to_string(),
+            top_k,
+            include_deps,
+        })? {
+            DaemonResponse::SearchResults { results } => Ok(results),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+        }
     }
 
-    async fn overview(&self, _project_root: &Path, _file: &Path) -> Result<String> {
-        todo!("DaemonClient::overview — IPC dispatch rewired in Phase 1")
+    async fn overview(&self, _project_root: &Path, file: &Path) -> Result<String> {
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::Overview {
+            file: file.to_path_buf(),
+        })? {
+            DaemonResponse::Overview { content } => Ok(content),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+        }
     }
 
-    async fn dep_overview(&self, _project_root: &Path, _crate_name: &str) -> Result<String> {
-        todo!("DaemonClient::dep_overview — IPC dispatch rewired in Phase 3")
+    async fn dep_overview(&self, _project_root: &Path, crate_name: &str) -> Result<String> {
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::DepOverview {
+            crate_name: crate_name.to_string(),
+        })? {
+            DaemonResponse::Overview { content } => Ok(content),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+        }
     }
 
     async fn set_embedding_model(
         &self,
         _project_root: &Path,
-        _model: &str,
-        _global: bool,
+        model: &str,
+        global: bool,
     ) -> Result<()> {
-        todo!("DaemonClient::set_embedding_model — IPC dispatch rewired in Phase 1")
+        use crate::ipc::protocol::{DaemonRequest, DaemonResponse};
+        match self.send(DaemonRequest::SetEmbeddingModel {
+            model: model.to_string(),
+            global,
+        })? {
+            DaemonResponse::Ok { .. } => Ok(()),
+            DaemonResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+        }
     }
 
     async fn add_source(
@@ -298,15 +735,16 @@ impl DebriefService for DaemonClient {
         _root: &Path,
         _dep: bool,
     ) -> Result<()> {
-        todo!("DaemonClient::add_source — IPC dispatch added in Phase 1")
+        // No IPC variant for source registration yet — fall back to in-process.
+        anyhow::bail!("daemon dispatch for add_source not implemented in Phase 1")
     }
 
     async fn list_sources(&self, _project_root: &Path) -> Result<Vec<SourceEntry>> {
-        todo!("DaemonClient::list_sources — IPC dispatch added in Phase 1")
+        anyhow::bail!("daemon dispatch for list_sources not implemented in Phase 1")
     }
 
     async fn remove_source(&self, _project_root: &Path, _index: usize) -> Result<()> {
-        todo!("DaemonClient::remove_source — IPC dispatch added in Phase 1")
+        anyhow::bail!("daemon dispatch for remove_source not implemented in Phase 1")
     }
 }
 
