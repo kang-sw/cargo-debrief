@@ -6,11 +6,12 @@
 
 ## Module Contracts
 
-- `load_index` returns `Ok(None)` for both **missing file** and **version mismatch**. Callers cannot distinguish the two cases. Both are treated as "start fresh."
+- `load_index` returns `Ok(None)` for **missing file**, **deserialization failure**, **version mismatch**, or **backend mismatch**. All four are treated as "start fresh." Only I/O errors propagate as `Err`.
 - `save_index` creates all parent directories automatically (`create_dir_all`). Callers do not need to pre-create the index directory.
-- `IndexData::version` is always `INDEX_VERSION` (currently `6`) on write; on read, any mismatch silently discards the file.
+- `IndexData::version` is always `INDEX_VERSION` (currently `7`) on write; on read, any mismatch silently discards the file.
 - `IndexData::chunks` maps `PathBuf` → `Vec<Chunk>`. The key is the file path as provided by the caller — no normalization occurs inside `store`.
-- `load_deps_index` returns `Ok(None)` for missing file, deserialization failure, or `DEPS_INDEX_VERSION` (currently `3`) mismatch — same semantics as `load_index`. Callers treat `None` as "stale; reindex."
+- `BackendTag` (`Wgpu` | `OrtCpu`) is serialized into both `IndexData` and `DepsIndexData`. `current_backend()` is a feature-gated `const fn` — exactly one of the `wgpu` or `ort-cpu` features must be enabled at compile time. On load, a tag mismatch causes the index to be discarded so embeddings from different backends are never mixed in the same HNSW graph.
+- `load_deps_index` returns `Ok(None)` for missing file, deserialization failure, `DEPS_INDEX_VERSION` (currently `4`) mismatch, or backend mismatch — same semantics as `load_index`. Callers treat `None` as "stale; reindex."
 - `save_deps_index` also calls `create_dir_all` on the parent directory.
 
 ## Coupling
