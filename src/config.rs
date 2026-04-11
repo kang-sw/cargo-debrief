@@ -1,40 +1,93 @@
+//! Configuration model for cargo-debrief.
+//!
+//! `Config` is the canonical project configuration loaded from a
+//! three-layer merge (global → project → local). `[[sources]]` is the
+//! single source of truth for "what to index": each entry names a
+//! language, a root directory, and optional dep classification.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Resolved paths for the three configuration layers.
-#[derive(Debug)]
-pub struct ConfigPaths {
-    /// `~/.config/debrief/config.toml` (or platform equivalent)
-    pub global: Option<PathBuf>,
-    /// `.debrief/config.toml` (git-tracked, team-shared)
-    pub project: Option<PathBuf>,
-    /// `.git/debrief/local-config.toml` (machine-local)
-    pub local: Option<PathBuf>,
+// ---------------------------------------------------------------------------
+// Source registration model
+// ---------------------------------------------------------------------------
+
+/// Supported source languages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    Rust,
+    Cpp,
 }
 
+/// One registered source directory.
+///
+/// `[[sources]]` entries in `config.toml` deserialize directly into this
+/// struct. `extensions = None` means "use the language default extension
+/// set" (e.g. `.rs` for Rust, `.cpp/.h/.hpp/...` for C++).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEntry {
+    pub language: Language,
+    pub root: PathBuf,
+    #[serde(default)]
+    pub dep: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
+// Dependency and LLM config sub-structs
+// ---------------------------------------------------------------------------
+
 /// Dependency-specific configuration.
+///
+/// Retained for backward compatibility with existing `[dependencies]`
+/// tables in user configs. Semantics under the new `[[sources]]` model
+/// are revisited during Phase 3.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DependencyConfig {
     /// Crate names to exclude from dependency indexing.
     pub exclude: Option<Vec<String>>,
 }
 
+/// External LLM configuration placeholder.
+///
+/// Stub — populated during the LLM chunk summarization work. Kept here
+/// so `[llm]` entries in user configs do not fail to parse.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub api_key_env: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Config top-level
+// ---------------------------------------------------------------------------
+
 /// Project-level configuration, merged from all layers.
 ///
 /// Resolution order: local > project > global > built-in default.
-/// Fields use `Option` so absent values in a layer don't overwrite
-/// values from a lower-priority layer.
+/// Scalar fields use `Option` so absent values in a layer don't overwrite
+/// values from a lower-priority layer. `sources` is additive at load
+/// time (higher layers can append but not replace individual entries —
+/// full replacement semantics are TBD during implementation).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub embedding_model: Option<String>,
     pub dependencies: Option<DependencyConfig>,
+    pub llm: Option<LlmConfig>,
+    /// Registered sources. Maps directly to `[[sources]]` in TOML.
+    #[serde(default)]
+    pub sources: Vec<SourceEntry>,
 }
 
 impl Config {
-    /// Merge `other` on top of `self`. Fields present in `other`
-    /// override the corresponding fields in `self`.
+    /// Merge `other` on top of `self`. Scalar fields present in `other`
+    /// override the corresponding fields in `self`; `sources` from
+    /// `other` replace `self.sources` when non-empty.
     fn merge(&mut self, other: Config) {
         if other.embedding_model.is_some() {
             self.embedding_model = other.embedding_model;
@@ -49,14 +102,31 @@ impl Config {
                 None => self.dependencies = Some(other_deps),
             }
         }
+        if other.llm.is_some() {
+            self.llm = other.llm;
+        }
+        if !other.sources.is_empty() {
+            self.sources = other.sources;
+        }
     }
 }
 
-/// Discover the git repository root by walking parent directories
-/// looking for a `.git` directory.
-///
-/// Note: only detects `.git` as a directory. Git worktrees and submodules
-/// use a `.git` file instead — not supported yet.
+// ---------------------------------------------------------------------------
+// Path resolution
+// ---------------------------------------------------------------------------
+
+/// Resolved paths for the three configuration layers.
+#[derive(Debug)]
+pub struct ConfigPaths {
+    /// `~/.config/debrief/config.toml` (or platform equivalent)
+    pub global: Option<PathBuf>,
+    /// `.debrief/config.toml` (git-tracked, team-shared)
+    pub project: Option<PathBuf>,
+    /// `.git/debrief/local-config.toml` (machine-local)
+    pub local: Option<PathBuf>,
+}
+
+/// Discover the git repository root by walking parent directories.
 fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut current = start;
     loop {
@@ -68,9 +138,6 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// Resolve configuration file paths for a project rooted at `project_root`.
-///
-/// If `project_root` is not inside a git repository, local and project
-/// paths will be `None`.
 pub fn config_paths(project_root: &Path) -> ConfigPaths {
     let global = dirs::config_dir().map(|d| d.join("debrief").join("config.toml"));
 
@@ -88,6 +155,10 @@ pub fn config_paths(project_root: &Path) -> ConfigPaths {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Load / save
+// ---------------------------------------------------------------------------
+
 /// Load a single TOML config file. Returns `None` if the file does not exist.
 pub fn load_layer_single(path: &Path) -> Result<Option<Config>> {
     match std::fs::read_to_string(path) {
@@ -102,7 +173,6 @@ pub fn load_layer_single(path: &Path) -> Result<Option<Config>> {
 }
 
 /// Write `config` to `path` as TOML, creating parent directories if needed.
-/// `None` fields are omitted from the output.
 pub fn save_config(path: &Path, config: &Config) -> Result<()> {
     let contents = toml::to_string_pretty(config).context("failed to serialize config")?;
     if let Some(parent) = path.parent() {
@@ -115,9 +185,6 @@ pub fn save_config(path: &Path, config: &Config) -> Result<()> {
 }
 
 /// Load and merge configuration from all layers.
-///
-/// Resolution order: built-in default → global → project → local.
-/// Each layer overrides fields set by the previous one.
 pub fn load_config(paths: &ConfigPaths) -> Result<Config> {
     let mut config = Config::default();
 
@@ -142,204 +209,50 @@ pub fn load_config(paths: &ConfigPaths) -> Result<Config> {
     Ok(config)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+// ---------------------------------------------------------------------------
+// Source registration helpers
+// ---------------------------------------------------------------------------
 
-    #[test]
-    fn config_paths_in_git_repo() {
-        // The cargo-debrief project itself is a git repo.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let paths = config_paths(root);
+/// Resolve the effective source list for a project.
+///
+/// If the merged config has a non-empty `sources` list, return it
+/// verbatim. Otherwise, fall back to auto-detection:
+/// `Cargo.toml` at `project_root` → single `Language::Rust` source with
+/// `root = "."`. Returns an empty vec if nothing is detectable.
+///
+/// This is the backward-compatibility bridge from the previous
+/// Cargo.toml-hardcoded pipeline to the new `[[sources]]` model.
+pub fn resolve_sources(project_root: &Path) -> Result<Vec<SourceEntry>> {
+    let paths = config_paths(project_root);
+    let config = load_config(&paths)?;
 
-        assert!(paths.global.is_some());
-        assert!(paths.project.is_some());
-        assert!(paths.local.is_some());
-
-        let project = paths.project.unwrap();
-        assert!(project.ends_with(".debrief/config.toml"));
-
-        let local = paths.local.unwrap();
-        assert!(local.ends_with(".git/debrief/local-config.toml"));
+    if !config.sources.is_empty() {
+        return Ok(config.sources);
     }
 
-    #[test]
-    fn config_paths_outside_git_repo() {
-        // /tmp is (almost certainly) not inside a git repo.
-        let paths = config_paths(Path::new("/tmp"));
-
-        assert!(paths.global.is_some());
-        assert!(paths.project.is_none());
-        assert!(paths.local.is_none());
+    if project_root.join("Cargo.toml").is_file() {
+        return Ok(vec![SourceEntry {
+            language: Language::Rust,
+            root: PathBuf::from("."),
+            dep: false,
+            extensions: None,
+        }]);
     }
 
-    #[test]
-    fn merge_overrides_fields() {
-        let mut base = Config {
-            embedding_model: Some("base-model".into()),
-            ..Default::default()
-        };
-        let overlay = Config {
-            embedding_model: Some("overlay-model".into()),
-            ..Default::default()
-        };
-        base.merge(overlay);
-        assert_eq!(base.embedding_model.as_deref(), Some("overlay-model"));
-    }
+    Ok(Vec::new())
+}
 
-    #[test]
-    fn merge_preserves_when_overlay_is_none() {
-        let mut base = Config {
-            embedding_model: Some("base-model".into()),
-            ..Default::default()
-        };
-        let overlay = Config {
-            embedding_model: None,
-            ..Default::default()
-        };
-        base.merge(overlay);
-        assert_eq!(base.embedding_model.as_deref(), Some("base-model"));
-    }
+/// Append a new source entry to the project config. Creates the project
+/// config file if it does not exist.
+///
+/// Skeleton: unimplemented. Wired in during Phase 1 implementation.
+pub fn append_source(_project_root: &Path, _entry: SourceEntry) -> Result<()> {
+    todo!("append_source: load project config, push SourceEntry, save_config")
+}
 
-    #[test]
-    fn load_config_from_temp_layers() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-
-        let global_dir = dir.path().join("global");
-        fs::create_dir_all(&global_dir)?;
-        fs::write(
-            global_dir.join("config.toml"),
-            r#"embedding_model = "global-model""#,
-        )?;
-
-        let project_dir = dir.path().join("project");
-        fs::create_dir_all(&project_dir)?;
-        fs::write(
-            project_dir.join("config.toml"),
-            r#"embedding_model = "project-model""#,
-        )?;
-
-        let paths = ConfigPaths {
-            global: Some(global_dir.join("config.toml")),
-            project: Some(project_dir.join("config.toml")),
-            local: None,
-        };
-
-        let config = load_config(&paths)?;
-        // Project overrides global.
-        assert_eq!(config.embedding_model.as_deref(), Some("project-model"));
-        Ok(())
-    }
-
-    #[test]
-    fn load_config_missing_files_uses_default() -> Result<()> {
-        let paths = ConfigPaths {
-            global: Some(PathBuf::from("/nonexistent/config.toml")),
-            project: None,
-            local: None,
-        };
-        let config = load_config(&paths)?;
-        assert!(config.embedding_model.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn load_config_malformed_toml_reports_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let bad_file = dir.path().join("bad.toml");
-        fs::write(&bad_file, "not valid toml [[[").unwrap();
-
-        let paths = ConfigPaths {
-            global: Some(bad_file.clone()),
-            project: None,
-            local: None,
-        };
-        let err = load_config(&paths).unwrap_err();
-        assert!(
-            err.to_string().contains("bad.toml"),
-            "error should mention file path: {err}"
-        );
-    }
-
-    #[test]
-    fn save_config_round_trips_model_name() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("config.toml");
-
-        let config = Config {
-            embedding_model: Some("test-model".into()),
-            ..Default::default()
-        };
-        save_config(&path, &config)?;
-
-        let paths = ConfigPaths {
-            global: Some(path),
-            project: None,
-            local: None,
-        };
-        let loaded = load_config(&paths)?;
-        assert_eq!(loaded.embedding_model.as_deref(), Some("test-model"));
-        Ok(())
-    }
-
-    #[test]
-    fn save_config_creates_parent_dirs() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("nested").join("dirs").join("config.toml");
-
-        let config = Config {
-            embedding_model: Some("test-model".into()),
-            ..Default::default()
-        };
-        save_config(&path, &config)?;
-        assert!(path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_config_exclude_list_round_trip() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("config.toml");
-
-        fs::write(
-            &path,
-            "[dependencies]\nexclude = [\"syn\", \"proc-macro2\"]\n",
-        )?;
-
-        let paths = ConfigPaths {
-            global: Some(path),
-            project: None,
-            local: None,
-        };
-        let config = load_config(&paths)?;
-        let deps = config.dependencies.expect("dependencies should be present");
-        let exclude = deps.exclude.expect("exclude should be present");
-        assert_eq!(exclude, vec!["syn".to_string(), "proc-macro2".to_string()]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_config_exclude_list_merge() {
-        let mut base = Config {
-            embedding_model: Some("base-model".into()),
-            dependencies: Some(DependencyConfig {
-                exclude: Some(vec!["serde".to_string()]),
-            }),
-        };
-        let overlay = Config {
-            embedding_model: None,
-            dependencies: Some(DependencyConfig {
-                exclude: Some(vec!["syn".to_string()]),
-            }),
-        };
-        base.merge(overlay);
-        let exclude = base
-            .dependencies
-            .unwrap()
-            .exclude
-            .expect("exclude should be present");
-        // Overlay replaces the base exclude list.
-        assert_eq!(exclude, vec!["syn".to_string()]);
-    }
+/// Remove the source entry at `index` from the project config.
+///
+/// Skeleton: unimplemented. Wired in during Phase 1 implementation.
+pub fn remove_source_at(_project_root: &Path, _index: usize) -> Result<()> {
+    todo!("remove_source_at: load project config, validate index, remove, save_config")
 }

@@ -1,13 +1,26 @@
+//! cargo-debrief CLI entrypoint.
+//!
+//! Skeleton rewrite for the multi-language sources epic
+//! (`260409-epic-multi-language-sources`). The dispatch wiring is in
+//! place so the binary compiles; indexing / search / overview call into
+//! `DebriefService` methods that are currently `todo!()` placeholders.
+//!
+//! New subcommands:
+//! - `add <language> [root] [--dep]` — register a source
+//! - `sources` — list registered sources
+//! - `remove <index>` — drop a source entry
+
 use std::path::PathBuf;
 
 use anyhow::Result;
 use cargo_debrief::{
     chunk::ChunkOrigin,
+    config::Language as ConfigLanguage,
     daemon,
     ipc::protocol::{DaemonRequest, DaemonResponse},
     service::{DebriefService, Service},
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "cargo-debrief", about = "RAG-based code retrieval for LLMs")]
@@ -52,6 +65,23 @@ enum Command {
         #[arg(long)]
         global: bool,
     },
+    /// Register a source directory for indexing
+    Add {
+        /// Source language
+        language: CliLanguage,
+        /// Root directory (defaults to project root for `rust`)
+        root: Option<PathBuf>,
+        /// Mark this source as a dependency (separate index namespace)
+        #[arg(long)]
+        dep: bool,
+    },
+    /// List registered sources
+    Sources,
+    /// Remove a source entry by index (see `sources`)
+    Remove {
+        /// Index of the source entry to remove
+        index: usize,
+    },
     /// Manage the background daemon
     Daemon {
         #[command(subcommand)]
@@ -66,12 +96,41 @@ enum Command {
     },
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum CliLanguage {
+    Rust,
+    Cpp,
+}
+
+impl From<CliLanguage> for ConfigLanguage {
+    fn from(value: CliLanguage) -> Self {
+        match value {
+            CliLanguage::Rust => ConfigLanguage::Rust,
+            CliLanguage::Cpp => ConfigLanguage::Cpp,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum DaemonAction {
     /// Check if daemon is running, report PID and uptime
     Status,
     /// Stop the running daemon
     Stop,
+}
+
+/// Install a basic `tracing_subscriber::fmt` layer respecting `RUST_LOG`.
+///
+/// Span stubs per pipeline stage land alongside the Phase 1 pipeline
+/// implementation; the subscriber is wired here so they have somewhere
+/// to emit from day one.
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
 }
 
 /// Resolve the service backend: try daemon (auto-spawn if needed), fall back to in-process.
@@ -85,6 +144,8 @@ fn resolve_service(project_root: &std::path::Path) -> Service {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
+
     let cli = Cli::parse();
 
     let project_root = std::env::current_dir()?;
@@ -160,6 +221,32 @@ async fn main() -> Result<()> {
             let scope = if global { "global" } else { "project" };
             println!("Embedding model set to {model:?} ({scope}).");
         }
+        Command::Add {
+            language,
+            root,
+            dep,
+        } => {
+            let root = root.unwrap_or_else(|| PathBuf::from("."));
+            service
+                .add_source(&project_root, language.into(), &root, dep)
+                .await?;
+            println!("Registered {:?} source at {}.", language, root.display());
+        }
+        Command::Sources => {
+            let sources = service.list_sources(&project_root).await?;
+            if sources.is_empty() {
+                println!("No sources registered.");
+            } else {
+                for (i, s) in sources.iter().enumerate() {
+                    let dep_marker = if s.dep { " [dep]" } else { "" };
+                    println!("{i}: {:?} {}{}", s.language, s.root.display(), dep_marker);
+                }
+            }
+        }
+        Command::Remove { index } => {
+            service.remove_source(&project_root, index).await?;
+            println!("Removed source #{index}.");
+        }
         // Already handled above
         Command::DaemonEntry { .. } | Command::Daemon { .. } => unreachable!(),
     }
@@ -177,7 +264,6 @@ fn handle_daemon_action(project_root: &std::path::Path, action: DaemonAction) ->
                 return Ok(());
             }
 
-            // Try to get status via IPC
             match cargo_debrief::ipc::send_command(
                 &dir,
                 DaemonRequest::Status,
@@ -190,7 +276,6 @@ fn handle_daemon_action(project_root: &std::path::Path, action: DaemonAction) ->
                     println!("Daemon responded unexpectedly: {other:?}");
                 }
                 Err(e) => {
-                    // Daemon PID exists but IPC failed
                     if let Some(pid) = daemon::read_pid(&dir) {
                         println!("Daemon PID {pid} exists but IPC unavailable: {e}");
                     } else {
@@ -218,7 +303,6 @@ fn handle_daemon_action(project_root: &std::path::Path, action: DaemonAction) ->
                 }
                 Err(e) => {
                     eprintln!("Failed to send stop: {e}");
-                    // Force kill as fallback
                     daemon::kill_stale_daemon(&dir);
                     println!("Daemon forcefully stopped.");
                 }

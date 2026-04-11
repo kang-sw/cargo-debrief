@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-cargo_metadata = "0.18"
 hnsw_rs = "0.3"
 bincode = "1"
 clap = { version = "4", features = ["derive"] }
@@ -22,6 +21,8 @@ serde = { version = "1", features = ["derive"] }
 tokenizers = "0.19"
 tokio = { version = "1", features = ["full"] }
 toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 
