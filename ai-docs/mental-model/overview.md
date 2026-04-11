@@ -17,7 +17,7 @@
 | `chunker` | `src/chunker/mod.rs`, `src/chunker/rust.rs` | `Chunker` trait + `RustChunker` (tree-sitter AST walk) |
 | `git` | `src/git.rs` | Git file tracking via `Command` shellout |
 | `store` | `src/store.rs` | Versioned index serialization (bincode) |
-| `embedder` | `src/embedder.rs` | Model registry, model file download, inference via two mutually exclusive `#[cfg]`-gated backends: `wgpu` (burn+WGPU, full) or `ort-cpu` (stub, Phase 2 pending) |
+| `embedder` | `src/embedder.rs` | Model registry, model file download, inference via two mutually exclusive `#[cfg]`-gated backends: `wgpu` (burn+WGPU) or `ort-cpu` (ONNX Runtime, CPU EP). Both produce identical-shape L2-normalized output. Cache layout: `<cache_dir>/<model>/burn/` (wgpu) or `<cache_dir>/<model>/ort/` (ort-cpu). |
 | `nomic_bert_burn` | `src/nomic_bert_burn.rs` | NomicBERT architecture in burn: weights loading, mean pooling, L2 norm; compiled only with `wgpu` feature (`#[cfg(feature = "wgpu")]`) |
 | `deps` | `src/deps.rs` | Cargo metadata parsing; dependency package discovery with root-dep reachability |
 | `search` | `src/search.rs` | Vector ANN search (hnsw_rs) with metadata score boosting |
