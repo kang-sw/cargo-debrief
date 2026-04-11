@@ -7,6 +7,8 @@ related:
   - 260405-feat-cpp-deps-discovery       # C++ deps, absorbed (add cpp "path" --dep)
   - 260405-feat-on-demand-dep-indexing   # on-demand deps, absorbed into sources model
   - 260404-feat-dependency-chunking      # existing all-deps approach, to be superseded
+skeletons:
+  all-phases: 4a494f3
 ---
 
 # Multi-Language Source Registration
