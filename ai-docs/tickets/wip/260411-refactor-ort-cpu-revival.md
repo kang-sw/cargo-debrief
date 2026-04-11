@@ -4,6 +4,8 @@ related:
   - 260409-refactor-burn-backend-unification  # prior consolidation that removed ort/candle
   - 260404-fix-gpu-acceleration               # original ort → candle migration
   - 260409-feat-gpu-performance-tuning        # NdArray fair benchmark that drove this decision
+plans:
+  - ai-docs/plans/2026-04/11-1033.ort-cpu-phase2.md  # Phase 2: ort inference path
 ---
 
 # Reintroduce ort CPU backend as the non-GPU build path
