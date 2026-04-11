@@ -505,7 +505,7 @@ pub fn burn_l2_normalize<B: Backend>(x: Tensor<B, 2>) -> Tensor<B, 2> {
 // ---------------------------------------------------------------------------
 
 /// Convert a flat `u32` buffer (as produced by the tokenizer) into a burn Int tensor
-/// of shape `[batch, seq]`. Burn's NdArray and Wgpu backends use `i64` for Int elements,
+/// of shape `[batch, seq]`. Burn's Wgpu backend uses `i64` for Int elements,
 /// so values are widened from u32 to i64.
 pub fn token_ids_to_burn_tensor<B: Backend>(
     ids: &[u32],
@@ -520,9 +520,7 @@ pub fn token_ids_to_burn_tensor<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
-
-    type TestBackend = NdArray;
+    type TestBackend = burn::backend::Wgpu;
 
     fn default_config() -> NomicBertConfig {
         NomicBertConfig::default()
