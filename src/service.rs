@@ -288,19 +288,23 @@ async fn run_index_for_sources(
     // ---- File discovery ---------------------------------------------------
     // Build (relative_path, language) pairs deduplicated across overlapping
     // source roots. The first source registered wins on a language conflict.
+    //
+    // Per-source strategy:
+    // - External source (abs_root has its own .git, or lies outside project_root):
+    //   use walkdir to enumerate files — git ls-files of the project repo cannot
+    //   see files tracked by a foreign git repo.
+    // - Project source: use git ls-files (existing behavior, single lazy call).
     let files: Vec<(PathBuf, Language)> = {
         let _span = info_span!("file_discovery").entered();
 
         let mut seen: HashMap<PathBuf, Language> = HashMap::new();
         let mut order: Vec<PathBuf> = Vec::new();
 
-        // Single git ls-files call serves every source — Phase 1 is full
-        // rebuild only, so `from = None`.
-        let changes = git::changed_files(project_root, None)?;
-        let all_paths: Vec<PathBuf> = changes.added.iter().map(PathBuf::from).collect();
+        // Lazily populated on first project-source entry.
+        let mut git_paths: Option<Vec<PathBuf>> = None;
 
         for entry in &project_sources {
-            let scoped_root = entry_relative_root(&entry.root);
+            let abs_root = project_root.join(&entry.root);
             let ext_set: HashSet<String> = entry
                 .extensions
                 .as_deref()
@@ -312,21 +316,60 @@ async fn run_index_for_sources(
                         .collect()
                 });
 
-            for rel in &all_paths {
-                if !path_under_root(rel, &scoped_root) {
-                    continue;
-                }
-                let Some(ext) = lowercase_extension(rel) else {
-                    continue;
-                };
-                if !ext_set.contains(&ext) {
-                    continue;
-                }
+            // Determine whether this source root is external to the project's
+            // git repo. Two conditions indicate an external repo:
+            // (a) the root has its own .git directory (a cloned sub-repo), or
+            // (b) it lies outside project_root entirely.
+            let is_external =
+                abs_root.join(".git").exists() || abs_root.strip_prefix(project_root).is_err();
 
-                match seen.get(rel) {
+            let candidate_paths: Vec<PathBuf> = if is_external {
+                // Walk the external root directly; collect paths relative to
+                // project_root so downstream code stays uniform.
+                walkdir::WalkDir::new(&abs_root)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter_map(|e| {
+                        let abs_path = e.into_path();
+                        let rel = abs_path
+                            .strip_prefix(project_root)
+                            .unwrap_or(&abs_path)
+                            .to_path_buf();
+                        let ext = lowercase_extension(&rel)?;
+                        if ext_set.contains(&ext) {
+                            Some(rel)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                // Project source: use git ls-files (lazily fetched once).
+                let all_paths = git_paths.get_or_insert_with(|| {
+                    git::changed_files(project_root, None)
+                        .map(|c| c.added.iter().map(PathBuf::from).collect())
+                        .unwrap_or_default()
+                });
+                let scoped_root = entry_relative_root(&entry.root);
+                all_paths
+                    .iter()
+                    .filter(|rel| path_under_root(rel, &scoped_root))
+                    .filter(|rel| {
+                        lowercase_extension(rel)
+                            .map(|e| ext_set.contains(&e))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            };
+
+            for rel in candidate_paths {
+                match seen.get(&rel) {
                     None => {
                         seen.insert(rel.clone(), entry.language);
-                        order.push(rel.clone());
+                        order.push(rel);
                     }
                     Some(existing) if *existing == entry.language => {
                         // silent unify — same-language duplicate
