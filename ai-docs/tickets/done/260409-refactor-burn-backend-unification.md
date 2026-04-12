@@ -1,8 +1,8 @@
 ---
 title: "Unify on burn backend — remove candle, wgpu as default"
 related:
-  - 260404-fix-gpu-acceleration      # candle migration that proved Metal unusable
-  - 260405-epic-gpu-embedding-acceleration  # burn NomicBERT implementation (child 1 done)
+  260404-fix-gpu-acceleration: candle migration that proved Metal unusable
+  260405-epic-gpu-embedding-acceleration: "burn NomicBERT implementation (child 1 done)"
 started: 2026-04-09
 ---
 

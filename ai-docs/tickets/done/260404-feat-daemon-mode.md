@@ -3,8 +3,8 @@ title: "Daemon Mode — Per-Workspace Background Process"
 category: feat
 priority: medium
 related:
-  - 260403-research-rag-architecture  # architecture decisions in section 6
-  - 260404-feat-dependency-chunking  # dep indexing increases index size, amplifies daemon value
+  260403-research-rag-architecture: architecture decisions in section 6
+  260404-feat-dependency-chunking: dep indexing increases index size, amplifies daemon value
 started: 2026-04-04
 completed: 2026-04-05
 ---

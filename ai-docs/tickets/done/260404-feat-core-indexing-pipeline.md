@@ -4,10 +4,10 @@ started: 2026-04-04
 completed: 2026-04-04
 parent: 260403-epic-mvp-implementation
 related:
-  - 260404-feat-cli-scaffold-config-service  # prerequisite — Config, DebriefService
-  - 260403-research-rag-architecture  # architecture decisions
-  - 260404-feat-rust-chunking-population  # deferred node kinds and quality improvements
-  - 260404-refactor-service-trait-multi-workspace  # trait shape change: project_root on each method
+  260404-feat-cli-scaffold-config-service: "prerequisite — Config, DebriefService"
+  260403-research-rag-architecture: architecture decisions
+  260404-feat-rust-chunking-population: deferred node kinds and quality improvements
+  260404-refactor-service-trait-multi-workspace: "trait shape change: project_root on each method"
   phase-3: null
   phase-4: null
 ---

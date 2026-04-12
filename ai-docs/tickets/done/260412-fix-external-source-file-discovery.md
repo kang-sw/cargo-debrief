@@ -3,7 +3,7 @@ title: "Fix file discovery for external source roots (non-project git repos)"
 category: bug
 priority: high
 related:
-  - 260409-epic-multi-language-sources
+  260409-epic-multi-language-sources:
 ---
 
 # Fix File Discovery for External Source Roots

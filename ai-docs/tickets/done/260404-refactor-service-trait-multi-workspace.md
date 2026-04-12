@@ -2,8 +2,8 @@
 title: "DebriefService trait — multi-workspace support via project root parameter"
 parent: 260403-epic-mvp-implementation
 related:
-  - 260404-feat-cli-scaffold-config-service  # original trait definition
-  - 260404-feat-core-indexing-pipeline  # depends on trait shape
+  260404-feat-cli-scaffold-config-service: original trait definition
+  260404-feat-core-indexing-pipeline: depends on trait shape
 started: 2026-04-04
 completed: 2026-04-04
 ---

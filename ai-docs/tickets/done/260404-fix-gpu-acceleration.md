@@ -6,7 +6,7 @@ started: 2026-04-05
 plans:
   phase-2: 2026-04/05-1400.candle-migration
 related:
-  - 260404-feat-dependency-chunking  # GPU speeds up dep indexing; volume increase amplifies value
+  260404-feat-dependency-chunking: "GPU speeds up dep indexing; volume increase amplifies value"
 ---
 
 # GPU Acceleration — Migrate from ort to candle

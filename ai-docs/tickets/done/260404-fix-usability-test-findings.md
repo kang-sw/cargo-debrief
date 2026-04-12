@@ -4,10 +4,10 @@ category: bug
 priority: critical
 started: 2026-04-04
 related:
-  - 260404-idea-usability-test-repos  # test that produced these findings
-  - 260404-feat-rust-chunking-population  # P1 overlaps with chunking improvements
-  - 260404-feat-dependency-chunking  # GPU pre-req shared
-  - 260404-feat-llm-chunk-summarization  # structural query mitigation
+  260404-idea-usability-test-repos: test that produced these findings
+  260404-feat-rust-chunking-population: P1 overlaps with chunking improvements
+  260404-feat-dependency-chunking: GPU pre-req shared
+  260404-feat-llm-chunk-summarization: structural query mitigation
 ---
 
 # Fix Usability Test Findings

@@ -3,9 +3,9 @@ title: "C++ Dependency Indexing — on-demand path-based with header-only defaul
 category: feat
 priority: medium
 related:
-  - 260405-feat-cpp-chunker              # prerequisite — chunker must exist first
-  - 260405-feat-on-demand-dep-indexing   # shared --dep infrastructure
-  - 260404-feat-dependency-chunking      # Rust equivalent (completed, pre-index approach)
+  260405-feat-cpp-chunker: prerequisite — chunker must exist first
+  260405-feat-on-demand-dep-indexing: shared --dep infrastructure
+  260404-feat-dependency-chunking: "Rust equivalent (completed, pre-index approach)"
 ---
 
 # C++ Dependency Indexing

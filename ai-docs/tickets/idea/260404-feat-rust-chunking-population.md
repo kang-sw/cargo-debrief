@@ -3,10 +3,10 @@ title: "Rust chunking population improvement — additional node kinds and quali
 category: feat
 priority: medium
 related:
-  - 260404-feat-core-indexing-pipeline  # MVP chunking baseline
-  - 260403-research-rag-architecture
-  - 260404-feat-dependency-chunking  # dep indexing amplifies population gaps
-  - 260404-idea-usability-test-repos  # test results inform priority of each node kind
+  260404-feat-core-indexing-pipeline: MVP chunking baseline
+  260403-research-rag-architecture:
+  260404-feat-dependency-chunking: dep indexing amplifies population gaps
+  260404-idea-usability-test-repos: test results inform priority of each node kind
 ---
 
 # Rust Chunking Population Improvement

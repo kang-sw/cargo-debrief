@@ -3,7 +3,7 @@ title: "C++ Chunker — tree-sitter-based AST-aware chunking for C/C++"
 category: feat
 priority: high
 related:
-  - 260404-feat-rust-chunking-population  # parallel language expansion
+  260404-feat-rust-chunking-population: parallel language expansion
 ---
 
 # C++ Chunker

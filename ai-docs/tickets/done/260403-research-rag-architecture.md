@@ -2,7 +2,7 @@
 category: research
 priority: high
 related:
-  - 260404-refactor-service-trait-multi-workspace  # refines the daemon/service design from section 6
+  260404-refactor-service-trait-multi-workspace: refines the daemon/service design from section 6
 ---
 
 # RAG Architecture Research for cargo-debrief

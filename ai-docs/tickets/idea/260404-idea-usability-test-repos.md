@@ -2,7 +2,7 @@
 title: "Usability Test Repos — Real-World Codebase Testing for Search Quality"
 parent: 260403-epic-mvp-implementation
 related:
-  - 260404-feat-rust-chunking-population
+  260404-feat-rust-chunking-population:
 category: idea
 priority: medium
 ---

@@ -3,9 +3,9 @@ title: "On-Demand Dependency Indexing — --dep flag with per-dep cached indexes
 category: feat
 priority: high
 related:
-  - 260404-feat-dependency-chunking    # existing all-deps approach (to be superseded)
-  - 260405-feat-cpp-chunker            # C++ chunker needed for C++ dep indexing
-  - 260405-feat-cpp-deps-discovery     # C++ dep discovery (pivoted to on-demand)
+  260404-feat-dependency-chunking: "existing all-deps approach (to be superseded)"
+  260405-feat-cpp-chunker: C++ chunker needed for C++ dep indexing
+  260405-feat-cpp-deps-discovery: "C++ dep discovery (pivoted to on-demand)"
 ---
 
 # On-Demand Dependency Indexing

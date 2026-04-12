@@ -1,8 +1,8 @@
 ---
 title: "GPU performance tuning — batch size, throughput optimization"
 related:
-  - 260409-refactor-burn-backend-unification  # burn+wgpu now sole backend
-  - 260405-epic-gpu-embedding-acceleration    # parent effort
+  260409-refactor-burn-backend-unification: burn+wgpu now sole backend
+  260405-epic-gpu-embedding-acceleration: parent effort
 ---
 
 # GPU Performance Tuning

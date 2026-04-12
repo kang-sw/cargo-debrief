@@ -3,9 +3,9 @@ title: "Dependency Chunking — Index Transitive Dependencies (Rust)"
 category: feat
 priority: high
 related:
-  - 260403-research-rag-architecture  # vector search + metadata boosting baseline
-  - 260404-feat-rust-chunking-population  # chunker quality affects dep indexing
-  - 260404-feat-daemon-mode  # daemon can cache dep indexes across sessions
+  260403-research-rag-architecture: vector search + metadata boosting baseline
+  260404-feat-rust-chunking-population: chunker quality affects dep indexing
+  260404-feat-daemon-mode: daemon can cache dep indexes across sessions
 ---
 
 # Dependency Chunking — Index Transitive Dependencies (Rust)

@@ -2,7 +2,7 @@
 category: epic
 priority: high
 related:
-  - 260404-refactor-service-trait-multi-workspace  # cross-cutting: multi-workspace trait shape
+  260404-refactor-service-trait-multi-workspace: "cross-cutting: multi-workspace trait shape"
 ---
 
 # MVP Implementation — cargo-debrief
