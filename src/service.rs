@@ -283,6 +283,9 @@ fn embed_chunks(chunks: &mut Vec<Chunk>, embedder: &Embedder) -> Result<()> {
 fn stamp_all_git_states(project_root: &Path, sources: &[SourceEntry], data: &mut IndexData) {
     let mut active_roots: HashSet<PathBuf> = HashSet::new();
     for entry in sources {
+        if entry.dep {
+            continue; // dep sources are not indexed; don't track their git roots
+        }
         let abs_root = project_root.join(&entry.root);
         if let Some(git_root) = git::find_git_root(&abs_root) {
             let head = match git::current_head(&git_root) {
@@ -342,7 +345,11 @@ async fn apply_incremental_updates(
         let git_root = git::find_git_root(&abs_root);
 
         if git_root.is_none() {
-            // Non-git source: full scan if no chunks exist under this root, else skip.
+            // Non-git source: full scan if no chunks exist under this root, else skip
+            // (manual-only policy for stable external trees).
+            // Assumption: registered non-git source roots are disjoint — if source B's
+            // abs_root is a path prefix of an already-indexed source A's keys, B would
+            // incorrectly see has_chunks=true. Callers should avoid overlapping non-git roots.
             let has_chunks = data.chunks.keys().any(|k| {
                 let abs_k = project_root.join(k);
                 abs_k.starts_with(&abs_root) || k.starts_with(&abs_root)
@@ -384,12 +391,48 @@ async fn apply_incremental_updates(
                     Err(e) => {
                         warn!(root = %git_root.display(), error = %e,
                               "git diff failed; falling back to full rebuild for this root");
-                        // Signal a full rebuild for this git root's sources.
-                        for src_entry in sources.iter().filter(|e| {
-                            !e.dep
-                                && git::find_git_root(&project_root.join(&e.root)).as_ref()
-                                    == Some(&git_root)
-                        }) {
+                        // Full rebuild for all sources under this git root.
+                        // First, collect sources so we know their abs_roots for key removal.
+                        let root_sources: Vec<&SourceEntry> = sources
+                            .iter()
+                            .filter(|e| {
+                                !e.dep
+                                    && git::find_git_root(&project_root.join(&e.root)).as_ref()
+                                        == Some(&git_root)
+                            })
+                            .collect();
+
+                        // Clear existing chunks for each source before re-scanning.
+                        for src_entry in &root_sources {
+                            let src_abs_root: PathBuf = if src_entry.root == Path::new(".")
+                                || src_entry.root.as_os_str().is_empty()
+                            {
+                                project_root.to_path_buf()
+                            } else {
+                                project_root.join(&src_entry.root)
+                            };
+                            let src_root_rel = entry_relative_root(&src_entry.root);
+                            let keys_to_remove: Vec<PathBuf> = data
+                                .chunks
+                                .keys()
+                                .filter(|k| {
+                                    let abs_k = if k.is_absolute() {
+                                        k.to_path_buf()
+                                    } else {
+                                        project_root.join(k)
+                                    };
+                                    abs_k.starts_with(&src_abs_root)
+                                        || (!src_root_rel.as_os_str().is_empty()
+                                            && k.starts_with(&src_root_rel))
+                                })
+                                .cloned()
+                                .collect();
+                            for key in keys_to_remove {
+                                data.chunks.remove(&key);
+                            }
+                        }
+
+                        for src_entry in root_sources {
                             let new_chunks =
                                 scan_source_full(project_root, src_entry, embedder).await?;
                             for (key, chunks) in new_chunks {
@@ -457,19 +500,18 @@ async fn apply_incremental_updates(
 
         // Files that were dirty last time, are now clean, and are not in commit_changed
         // have been reverted — re-index them to HEAD version.
-        let commit_all_paths: HashSet<&str> = commit_changed
+        // Keep paths in PathBuf domain to avoid silent UTF-8 lossy conversions.
+        let commit_all_paths: HashSet<&Path> = commit_changed
             .added
             .iter()
             .chain(&commit_changed.modified)
             .chain(&commit_changed.deleted)
-            .map(|s| s.as_str())
+            .map(|s| Path::new(s.as_str()))
             .collect();
 
         let mut reverted: HashSet<PathBuf> = HashSet::new();
         for path in prev_dirty.dirty_snapshot.file_hashes.keys() {
-            if !current_dirty.contains_key(path)
-                && !commit_all_paths.contains(path.to_str().unwrap_or(""))
-            {
+            if !current_dirty.contains_key(path) && !commit_all_paths.contains(path.as_path()) {
                 reverted.insert(path.clone());
             }
         }
@@ -663,13 +705,8 @@ async fn scan_source_full(
 
     let mut result: HashMap<PathBuf, Vec<Chunk>> = HashMap::new();
     for key in candidate_keys {
+        // project_root.join is a no-op for absolute keys (POSIX: absolute component wins).
         let abs_file = project_root.join(&key);
-        let abs_file = if abs_file.is_absolute() && abs_file.exists() {
-            abs_file
-        } else {
-            // For external absolute keys the join is a no-op (POSIX: absolute component).
-            project_root.join(&key)
-        };
         let mut chunks = chunk_file(&abs_file, &key, entry.language);
         if chunks.is_empty() {
             continue;
