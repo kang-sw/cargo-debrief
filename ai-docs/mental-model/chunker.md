@@ -8,6 +8,7 @@
 ## Module Contracts
 
 - `Chunker::chunk` takes a `file_path` and source `&str`; returns `Vec<Chunk>` with `embedding` always `None` — embeddings are filled downstream, never by the chunker.
+- `CppChunker` class name extraction: after obtaining the `"name"` field node from `class_specifier`, the code calls `name_node.next_sibling()` and appends its text when `sib.kind() == "template_argument_list"`. This produces `Foo<int>` (not `Foo`) as the `symbol_name` for explicit/partial specializations. Any new name-extraction path in `cpp.rs` that skips this sibling check will silently register a bare base name, breaking deduplication and search for specialized types.
 - `RustChunker` produces up to three chunk types per file:
   - `ChunkType::Overview` with `kind: ChunkKind::Struct/Enum/Trait/Impl` — one per named type/impl group.
   - `ChunkType::Overview` with `kind: ChunkKind::Module` — one per file that has any free functions; aggregates all free functions for that file. Produced only when free functions exist.
@@ -45,6 +46,7 @@
 
 ## Common Mistakes
 
+- **Adding a name-extraction path in `CppChunker::collect_class`** — only the `"name"` field node and its immediate next sibling are inspected; the sibling check for `template_argument_list` is how specialization arguments are appended. Omitting an equivalent sibling check in new extraction logic will silently drop template arguments from `symbol_name`.
 - **Absolute file path to `chunk()`** — `derive_module_path` silently produces a wrong module name because the `src/` strip fails. Always pass a path relative to the crate root.
 - **Expecting `embedding` to be filled** — `Chunk::embedding` is always `None` out of `RustChunker`. Callers that check for a populated embedding immediately after chunking will see `None`.
 - **Orphan impl kind** — a type that appears only in `impl` blocks (no `struct`/`enum` def in file) gets `kind: Impl`, not its semantic kind. Filtering chunks by `ChunkKind::Struct` will miss orphan impls.

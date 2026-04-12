@@ -47,15 +47,24 @@ private free functions plus a small embedder helper:
 1. **Source partitioning.** Sources with `dep == true` are dropped
    (Phase 1 only) with a `tracing::warn!`. Phase 3 will reintroduce them
    under a separate per-dep namespace at `.debrief/deps/<key>.bin`.
-2. **`file_discovery` span.** Single `git ls-files`-equivalent call
-   (`git::changed_files(project_root, None)`) yields the universe of
-   tracked paths. For each project source, paths are filtered by
-   prefix-under-root and lowercased extension. The effective extension
-   set is `entry.extensions` if `Some`, otherwise the language default
-   (`Rust → ["rs"]`, `Cpp → ["cpp", "cc", "cxx", "c", "h", "hpp", "hxx", "hh"]`).
-   Paths matched by multiple sources with the **same** language are
-   silently unified; paths matched by multiple sources with **different**
-   languages keep the first registration and emit a `tracing::warn!`.
+2. **`file_discovery` span.** Per-source dispatch — each `SourceEntry`
+   is classified as **external** or **project** and collected independently.
+   A source is external when `abs_root != project_root && abs_root.join(".git").exists()`
+   (foreign cloned sub-repo) OR when `abs_root.strip_prefix(project_root)` fails
+   (entirely outside the project tree). External sources are walked with
+   `walkdir::WalkDir::new(&abs_root)` (follow_links=false); project sources
+   use a lazily-populated `git::changed_files(project_root, None)` result
+   that is fetched at most once and shared across all project entries.
+   All output paths are relative to `project_root`; for fully-external abs
+   roots the stored key is an absolute path (POSIX `join` of an absolute path
+   supersedes the prefix, so `project_root.join(abs_key)` resolves correctly).
+   The effective extension set is `entry.extensions` if `Some`, otherwise
+   the language default (`Rust → ["rs"]`, `Cpp → ["cpp", "cc", "cxx", "c",
+   "h", "hpp", "hxx", "hh"]`). Paths matched by multiple sources with the
+   **same** language are silently unified; paths matched by multiple sources
+   with **different** languages keep the first registration and emit a
+   `tracing::warn!`. After discovery a `[discovery] N files across M sources`
+   line is printed unconditionally to stderr.
 3. **`chunking` span.** Iterates `(relative_path, language)` pairs,
    reads source bytes, dispatches via `chunker_for(&language)`. Per-file
    read or chunk failures log a `tracing::warn!` and skip the file —
@@ -65,10 +74,16 @@ private free functions plus a small embedder helper:
 4. **`embedding` span.** Flattens chunks into a single mutable-ref list
    in stable iteration order, batches by `EMBED_BATCH_SIZE = 64`, calls
    `embedder.embed_batch(&texts)`, assigns vectors back into
-   `chunk.embedding = Some(vec)`. Progress is the historical idiom:
-   `indexing` once on stderr, `.` per batch, `\ndone. N chunks, M files.`
-   at the end. Stderr output is **unconditional** — it ignores
+   `chunk.embedding = Some(vec)`. Progress uses `std::io::IsTerminal` to
+   detect TTY on stderr: on a TTY each batch overwrites the previous line
+   with `\r[embedding]  batch N/total  (X chunks/s, ETA Ys)` (padded to
+   80 chars), followed by a final `\n`; on non-TTY each batch is a
+   separate `eprintln!` line. After all batches a
+   `done. N chunks, M files.  total Xs` summary is printed
+   unconditionally. All progress output goes to stderr and ignores
    `RUST_LOG`. The `tracing` span coexists with it.
+   Per-file chunking progress (`[chunking]   file N/M  <path>`) follows
+   the same TTY/non-TTY pattern immediately before the embedding phase.
 5. **`index_build` span.** Constructs `IndexData::new()` (the `version`
    and `backend` fields are private and cannot be set via struct literal
    from outside `store.rs`), assigns `data.chunks = map`, returns it.
@@ -152,5 +167,5 @@ private free functions plus a small embedder helper:
 - **Calling `run_index_for_sources` and expecting `last_indexed_commit` / `embedding_model` to be set** — both fields are `None` on the returned `IndexData`. The caller (`load_or_rebuild_index`) is responsible for stamping them.
 - **Expecting `--no-deps` to do anything in Phase 1** — `include_deps` is parsed and passed through, but the body is a `tracing::debug!` no-op. Dep indexing reactivates in Phase 3 of ticket 260409 under a per-dep namespace.
 - **Expecting `dep_overview` to return data** — Phase 1 always returns `Err`. The previous `deps-index.bin` storage was removed; Phase 3 will reintroduce dep storage and re-enable this method.
-- **Capturing only stdout when testing service output** — indexing progress (`indexing....done.`) goes to stderr unconditionally. Integration tests or tools that pipe only stdout will miss it.
+- **Capturing only stdout when testing service output** — all indexing progress (`[discovery]`, `[chunking]`, `[embedding]`, `done.`) goes to stderr unconditionally. Integration tests or tools that pipe only stdout will miss it.
 - **Expecting daemon errors to propagate** — `Service` silently falls back to `InProcessService` on any daemon error, emitting only an `eprintln!`. A broken daemon causes silent performance degradation (InProcess is heavier than IPC), not a visible error. Daemon-bug investigation must inspect stderr for `[daemon] error` lines.
