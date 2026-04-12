@@ -4,6 +4,10 @@ category: bug
 priority: high
 related:
   - 260412-fix-external-source-file-discovery
+skeletons:
+  phase-1: c4914ab
+  phase-2: c4914ab
+  phase-3: c4914ab
 ---
 
 # Fix Incremental Indexing
