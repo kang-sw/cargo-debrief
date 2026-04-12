@@ -282,7 +282,19 @@ impl<'a> ChunkCollector<'a> {
     fn collect_class(&mut self, node: Node<'a>, namespace: &str) {
         let name = node
             .child_by_field_name("name")
-            .map(|n| node_text(n, self.source).to_string())
+            .map(|name_node| {
+                let base = node_text(name_node, self.source).to_string();
+                // For template explicit/partial specializations such as
+                // `template<> class Foo<int>` or `template<T> class Bar<T, int>`,
+                // a `template_argument_list` immediately follows the name node.
+                // Append it so the registered name is `Foo<int>` not just `Foo`.
+                match name_node.next_sibling() {
+                    Some(sib) if sib.kind() == "template_argument_list" => {
+                        format!("{base}{}", node_text(sib, self.source))
+                    }
+                    _ => base,
+                }
+            })
             .unwrap_or_else(|| "_".to_string());
         let qualified = if namespace.is_empty() {
             name.clone()
@@ -1068,5 +1080,56 @@ private:
         assert!(overview.display_text.contains("Buffer()"));
         assert!(overview.display_text.contains("int size() const"));
         assert!(overview.display_text.contains("int* data"));
+    }
+
+    #[test]
+    fn template_full_specialization_name_includes_arguments() {
+        let source = r#"
+template<> class Foo<int> {
+public:
+    int value() const;
+    void set_value(int v);
+    void reset_to_default_and_notify();
+};
+"#;
+        let chunks = chunk_source("include/foo.h", source);
+
+        // The chunk name must be `Foo<int>`, not just `Foo`.
+        let overview = chunks
+            .iter()
+            .find(|c| {
+                c.metadata.symbol_name == "Foo<int>" && c.metadata.chunk_type == ChunkType::Overview
+            })
+            .expect(
+                "Foo<int> overview chunk present — full specialization name must include <int>",
+            );
+        assert_eq!(overview.metadata.kind, ChunkKind::Struct);
+        assert!(overview.display_text.contains("Foo"));
+    }
+
+    #[test]
+    fn template_partial_specialization_name_includes_arguments() {
+        let source = r#"
+template<typename T> class Bar<T, int> {
+public:
+    T first() const;
+    int second() const;
+    void apply_transform_and_notify(T val);
+};
+"#;
+        let chunks = chunk_source("include/bar.h", source);
+
+        // The chunk name must be `Bar<T, int>`, not just `Bar`.
+        let overview = chunks
+            .iter()
+            .find(|c| {
+                c.metadata.symbol_name == "Bar<T, int>"
+                    && c.metadata.chunk_type == ChunkType::Overview
+            })
+            .expect(
+                "Bar<T, int> overview chunk present — partial specialization name must include <T, int>",
+            );
+        assert_eq!(overview.metadata.kind, ChunkKind::Struct);
+        assert!(overview.display_text.contains("Bar"));
     }
 }
