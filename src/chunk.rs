@@ -113,3 +113,4 @@ mod tests {
         assert_eq!(original, decoded);
     }
 }
+// smoke-test-marker
