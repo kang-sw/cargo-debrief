@@ -1,3 +1,13 @@
+---
+domain: daemon
+description: "Per-workspace daemon lifecycle: PID flock, idle timeout, cooperative shutdown, auto-spawn"
+sources:
+  - src/
+related:
+  ipc: "daemon.rs owns IPC endpoint setup and cleanup"
+  service: "Service wraps DaemonClient; handle_request dispatches to InProcessService"
+---
+
 # Daemon — Mental Model
 
 ## Entry Points
@@ -38,5 +48,5 @@
 
 ## Technical Debt
 
-- `daemon_dir` duplicates the git-root-walk from `config.rs`, `service.rs::index_path`, and `service.rs::deps_index_path`. There are now four independent copies of this logic.
+- `daemon_dir` duplicates the git-root-walk from `config.rs` and `service.rs::index_path`. There are at least three independent copies of this logic.
 - R1 flock gap: the PID flock is released before `wait_for_readiness` to avoid holding it across a 30-second polling window. A concurrent spawner that was blocked on the flock can slip through and spawn a second daemon. The second daemon self-bails via its own PID flock in `write_pid_file`, so correctness is maintained, but a spurious daemon process is briefly created and killed.

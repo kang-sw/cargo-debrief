@@ -1,3 +1,13 @@
+---
+domain: embedder
+description: "Text embedding inference: ModelRegistry, Embedder, two mutually-exclusive backends (wgpu/burn and ort-cpu/ONNX)"
+sources:
+  - src/
+related:
+  service: "build_embedder is the sole Embedder construction point; called before every index or search"
+  search: "Embedding dimension from Embedder must match vectors stored in the index at search time"
+---
+
 # Embedder — Mental Model
 
 ## Entry Points

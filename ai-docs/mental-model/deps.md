@@ -1,3 +1,12 @@
+---
+domain: deps
+description: "Cargo dependency discovery: MetadataCommand shell-out, BFS root-dep attribution (currently unused in Phase 1 pipeline)"
+sources:
+  - src/
+related:
+  service: "Phase 3 of 260409-epic-multi-language-sources will re-wire discover_dependency_packages into the indexing pipeline"
+---
+
 # Deps — Mental Model
 
 ## Entry Points
@@ -15,12 +24,12 @@
 
 ## Coupling
 
-- **Phase 2 wiring lives in `service.rs`, not `deps.rs`.** `discover_dependency_packages` is called by `run_deps_index` in `service.rs`. The `deps` module itself remains a pure discovery module — no indexing logic is added here.
-- **`discover_dependency_packages` is called once per `run_deps_index` invocation** (i.e., whenever `Cargo.lock` hash changes). There is no cross-call caching inside `deps.rs`; `service.rs` avoids repeat calls by gating on `ensure_deps_index_fresh`.
-- **`ChunkOrigin::Dependency` is populated by `service.rs::run_deps_index`**, not by `deps.rs` or `chunker`. The chunker assigns `ChunkOrigin::Project` by default; `run_deps_index` overwrites `chunk.origin` after chunking.
+- `deps.rs` is a **pure discovery module** — no indexing logic lives here.
+- **`discover_dependency_packages` is not called in Phase 1** of the indexing pipeline. Sources with `dep == true` are currently dropped with a `tracing::warn!` inside `load_or_rebuild_index`. Phase 3 of ticket `260409-epic-multi-language-sources` will re-wire it under `.debrief/deps/<key>.bin` storage.
+- When dep indexing resumes, `ChunkOrigin::Dependency` must be set explicitly by the pipeline (the chunker always emits `ChunkOrigin::Project` by default).
 
 ## Common Mistakes
 
 - **Passing a file path instead of a directory** — `MetadataCommand::current_dir` expects the project root directory, not a `Cargo.toml` path. Passing a file path makes `cargo metadata` fail with a non-obvious error.
-- **Expecting `src_root` to point at source files directly** — `src_root` is the crate's manifest directory. Source files live under `src_root/src/`. `service.rs::collect_dep_rs_files` appends `src/` before walking.
+- **Expecting `src_root` to point at source files directly** — `src_root` is the crate's manifest directory (`Cargo.toml` parent). Source files live under `src_root/src/` — callers must append `src/` before walking.
 - **Assuming non-empty `root_deps` for every package** — packages reachable only via optional features may have empty `root_deps`. The embedding annotation omits the `(dependency of: ...)` clause in that case; chunks are still indexed.

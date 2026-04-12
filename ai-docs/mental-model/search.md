@@ -1,3 +1,14 @@
+---
+domain: search
+description: "HNSW vector search with symbol-name metadata boosting, dep-origin penalty, and over-fetch window"
+sources:
+  - src/
+related:
+  service: "SearchIndex is constructed per-call inside InProcessService::search from IndexData chunks"
+  embedder: "Query embedding dimension must match stored chunk embeddings — mismatch panics in HNSW"
+  chunker: "module_path parsing in extract_module_path depends on the embedding_text header format written by chunkers"
+---
+
 # Search — Mental Model
 
 ## Entry Points

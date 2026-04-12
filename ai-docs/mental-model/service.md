@@ -1,3 +1,19 @@
+---
+domain: service
+description: "DebriefService trait and dispatch: InProcessService, DaemonClient, Service, and the full incremental indexing pipeline"
+sources:
+  - src/
+related:
+  chunker: "chunk_file dispatches to chunker_for(language)"
+  embedder: "build_embedder is the sole construction path for all embedding"
+  store: "load_or_rebuild_index reads/writes IndexData via load_index/save_index"
+  git: "apply_incremental_updates drives changed_files and dirty_files queries"
+  search: "SearchIndex rebuilt from IndexData chunks on each search call"
+  daemon: "Service wraps DaemonClient with InProcessService fallback on error"
+  ipc: "DaemonClient uses the IPC protocol; new methods require protocol.rs variants"
+  config: "Config resolved from project_root in every InProcessService method"
+---
+
 # Service — Mental Model
 
 ## Entry Points

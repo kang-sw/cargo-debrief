@@ -1,3 +1,14 @@
+---
+domain: store
+description: "Versioned bincode index serialization: IndexData, GitRepoState, DirtySnapshot, BackendTag"
+sources:
+  - src/
+related:
+  service: "load_or_rebuild_index is the sole reader/writer of IndexData"
+  embedder: "BackendTag must match between the stored index and the current build configuration"
+  git: "GitRepoState and DirtySnapshot track per-git-root incremental state"
+---
+
 # Store — Mental Model
 
 ## Entry Points

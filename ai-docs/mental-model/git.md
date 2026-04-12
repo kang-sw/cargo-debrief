@@ -1,3 +1,13 @@
+---
+domain: git
+description: "Git file tracking via shell-out: head commit, file diffs, dirty-file detection with sha256 hashes"
+sources:
+  - src/
+related:
+  store: "GitRepoState and DirtySnapshot are the persistence types for per-root state"
+  service: "apply_incremental_updates is the sole production caller of changed_files and dirty_files"
+---
+
 # Git — Mental Model
 
 ## Entry Points

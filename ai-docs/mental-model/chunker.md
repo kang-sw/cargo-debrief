@@ -1,3 +1,13 @@
+---
+domain: chunker
+description: "Tree-sitter AST-aware chunking: Chunker trait, RustChunker (two-pass), CppChunker"
+sources:
+  - src/chunker/
+related:
+  service: "chunk_file and scan_source_full dispatch via chunker_for(language)"
+  store: "ChunkKind or Chunk field changes require INDEX_VERSION bump"
+---
+
 # Chunker — Mental Model
 
 ## Entry Points

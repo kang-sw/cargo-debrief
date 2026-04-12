@@ -1,3 +1,12 @@
+---
+domain: config
+description: "3-layer config resolution (global → project → local), SourceEntry registration helpers, merge semantics"
+sources:
+  - src/
+related:
+  service: "Every InProcessService method resolves config via config_paths + load_config"
+---
+
 # Config — Mental Model
 
 ## Entry Points

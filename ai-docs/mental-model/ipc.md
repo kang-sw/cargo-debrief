@@ -1,3 +1,13 @@
+---
+domain: ipc
+description: "Platform-abstracted daemon IPC: FIFO (Unix) / atomic-rename (Windows), flock client serialization, JSON framing"
+sources:
+  - src/ipc/
+related:
+  daemon: "daemon.rs calls DaemonIpc::setup and cleanup_ipc_files to own endpoint lifecycle"
+  service: "DaemonClient and result types (IndexResult, SearchResult) are defined in service.rs"
+---
+
 # IPC — Mental Model
 
 ## Entry Points
