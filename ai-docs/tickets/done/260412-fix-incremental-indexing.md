@@ -3,6 +3,7 @@ title: "Fix incremental indexing — multi-repo git tracking, dirty HEAD, and pe
 category: bug
 priority: high
 started: 2026-04-12
+completed: 2026-04-12
 related:
   - 260412-fix-external-source-file-discovery
 skeletons:

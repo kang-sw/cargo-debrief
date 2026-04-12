@@ -70,8 +70,11 @@ Single binary — daemon runs as `cargo debrief daemon`, not a separate executab
 - **Hierarchical chunking**: level 0 (struct skeletons — signatures
   only), level 1 (function bodies), level 2 (referenced type declarations).
   Search hits at level 1 auto-attach level 0 context.
-- **Git-based incremental indexing**: store last-indexed commit hash, diff
-  against HEAD to find changed files. Prioritize validating this early.
+- **Git-based incremental indexing**: per-git-root `GitRepoState` tracks
+  `last_indexed_commit` + `DirtySnapshot` (sha256 per dirty/untracked file).
+  `ensure_index_fresh` diffs commit changes + dirty changes + reverts per
+  source; patches `IndexData.chunks` surgically. Non-git sources scan once,
+  manual-only thereafter (`rebuild-index --source <path>`).
 - **Rust-first, language-extensible**: Start with tree-sitter-rust. Chunker
   trait allows adding more languages later.
 - **Unified config**: `cargo debrief config <key> [value] [--global]`.
@@ -182,3 +185,4 @@ Tickets: `260404-feat-llm-chunk-summarization` (E),
 - External source file discovery fix (`260412-fix-external-source-file-discovery`): `run_index_for_sources` now uses per-source walkdir for external git repos (separate `.git`). Single `git ls-files` was producing 0 files for cloned C++ repos. walkdir dep added. First GPU throughput datapoint: 14 chunks/s / 7m37s (6412 chunks, wgpu). ~2.5× over CPU ort baseline.
 - Live progress output added to rebuild-index: `[discovery]` file count, `[chunking]` per-file with \r on TTY, `[embedding]` batch N/total with chunks/s + ETA. No external crate.
 - Test repos added: `test-repos/nlohmann-json`, `test-repos/asio`, `test-repos/fmtlib` (shallow clones for C++ smoke testing). Registered as cpp sources. Search quality smoke test pending.
+- Incremental indexing implemented (`260412-fix-incremental-indexing`): per-git-root GitRepoState replaces single last_indexed_commit. git status --porcelain tracks dirty/untracked files with sha256 content hashes; revert detection via dirty_snapshot O(n) scan. Non-git sources scan once, manual-only thereafter. rebuild-index --source <path> for targeted refresh. INDEX_VERSION 7→8. Smoke test pending: verify single-file edit triggers seconds-scale re-index instead of 7-min full rebuild.
