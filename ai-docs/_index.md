@@ -119,8 +119,9 @@ Run after changes to service wiring, chunker, embedder, search, or store.
 
 ## Mental Model
 
-See `ai-docs/mental-model/` for operational knowledge:
-- `overview.md` — crate structure, module map, coupling notes
+See `ai-docs/mental-model.md` for the crate overview (entry points, module map, coupling).
+Domain docs in `ai-docs/mental-model/`:
+
 - `config.md` — 3-layer resolution, merge semantics, known limitations
 - `service.md` — DebriefService trait, RPITIT non-object-safety, dispatch options
 - `chunker.md` — two-pass design, impl aggregation, orphan impl handling
