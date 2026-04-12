@@ -221,12 +221,12 @@ fn lowercase_extension(path: &Path) -> Option<String> {
 /// Phase 1 staleness rules (binary; no incremental diffs):
 /// - Missing file → rebuild.
 /// - `embedding_model` differs from `current_model_name` → rebuild.
-/// - `last_indexed_commit` differs from current `git HEAD` → rebuild.
+/// - `git_states` staleness check (Phase 2 — currently triggers full rebuild on any HEAD change).
 /// - `force_full == true` → rebuild unconditionally.
 ///
 /// If `git::head_commit` fails (e.g. empty repo with no HEAD), the
 /// commit field is treated as "always rebuild" and the resulting index
-/// stores `last_indexed_commit = None`.
+/// stores an empty `git_states` map.
 async fn load_or_rebuild_index(
     project_root: &Path,
     embedder: &Embedder,
@@ -236,18 +236,44 @@ async fn load_or_rebuild_index(
     let path = index_path(project_root)?;
     let head = git::head_commit(project_root).ok();
 
-    if !force_full
-        && let Some(existing) = store::load_index(&path)?
-        && existing.embedding_model.as_deref() == Some(model_name)
-        && let Some(head_hash) = head.as_deref()
-        && existing.last_indexed_commit.as_deref() == Some(head_hash)
-    {
-        return Ok(existing);
+    if !force_full {
+        if let Some(existing) = store::load_index(&path)? {
+            if existing.embedding_model.as_deref() == Some(model_name) {
+                // TODO(Phase 2): wire incremental staleness check per git root.
+                // For now, check the project root's git state as a simple binary gate.
+                if let Some(head_hash) = head.as_deref() {
+                    let project_git_root = git::find_git_root(project_root);
+                    let is_fresh = project_git_root.as_ref().is_some_and(|root| {
+                        existing
+                            .git_states
+                            .get(root)
+                            .is_some_and(|s| s.last_indexed_commit == head_hash)
+                    });
+                    if is_fresh {
+                        return Ok(existing);
+                    }
+                }
+                // todo!("Phase 2: wire incremental staleness check")
+                // Fallthrough to full rebuild for now.
+            }
+        }
     }
 
     let sources = config::resolve_sources(project_root)?;
     let mut data = run_index_for_sources(project_root, &sources, embedder).await?;
-    data.last_indexed_commit = head;
+
+    // Stamp git_states: record current HEAD for the project git root.
+    if let Some(head_hash) = head {
+        if let Some(git_root) = git::find_git_root(project_root) {
+            data.git_states.insert(
+                git_root,
+                store::GitRepoState {
+                    last_indexed_commit: head_hash,
+                    dirty_snapshot: store::DirtySnapshot::default(),
+                },
+            );
+        }
+    }
     data.embedding_model = Some(model_name.to_string());
     store::save_index(&path, &data)?;
     Ok(data)
@@ -257,7 +283,7 @@ async fn load_or_rebuild_index(
 ///
 /// `sources` is the caller-resolved list (so tests can inject one).
 /// Returns an `IndexData` whose `chunks` map is populated; the caller
-/// (`load_or_rebuild_index`) stamps `last_indexed_commit` and
+/// (`load_or_rebuild_index`) stamps `git_states` and
 /// `embedding_model` afterwards.
 async fn run_index_for_sources(
     project_root: &Path,
@@ -550,10 +576,9 @@ async fn run_index_for_sources(
         data.chunks = per_file;
         data
     };
-    // `last_indexed_commit` and `embedding_model` are stamped by the
+    // `git_states` and `embedding_model` are stamped by the
     // caller — `run_index_for_sources` is intentionally agnostic about
     // which commit/model the rebuild ran against.
-    data.last_indexed_commit = None;
     data.embedding_model = None;
     Ok(data)
 }

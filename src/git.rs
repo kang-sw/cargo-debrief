@@ -1,7 +1,9 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 /// Categorized file changes between two index states.
 pub struct FileChanges {
@@ -110,6 +112,111 @@ fn diff_since(repo_root: &Path, from_hash: &str) -> Result<FileChanges> {
     }
 
     Ok(changes)
+}
+
+/// Walk parent directories looking for `.git` (file or directory).
+/// Returns the directory that contains `.git`, or None if not found.
+/// Handles both regular `.git/` dirs and `.git` files (worktrees, submodules).
+///
+/// Pure filesystem traversal — no subprocess.
+pub fn find_git_root(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+
+    loop {
+        let git_path = current.join(".git");
+        if git_path.exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Get the current HEAD commit hash for the given git root.
+///
+/// Shells out to `git -C <root> rev-parse HEAD`.
+pub fn current_head(root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+        .output()
+        .context("failed to run git rev-parse HEAD")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git rev-parse HEAD failed: {}", stderr.trim());
+    }
+
+    let hash = String::from_utf8(output.stdout).context("git output is not valid UTF-8")?;
+    Ok(hash.trim().to_string())
+}
+
+/// Parse `git -C <root> status --porcelain` and compute sha256 per dirty file.
+/// Returns a map from repo-relative path to sha256 content hash.
+///
+/// Covers tracked-modified, staged, deleted (hash is all-zeros for deleted),
+/// and untracked files. `.gitignore` is respected.
+pub fn dirty_files(root: &Path) -> Result<HashMap<PathBuf, [u8; 32]>> {
+    let output = Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "status", "--porcelain"])
+        .output()
+        .context("failed to run git status --porcelain")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git status --porcelain failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8(output.stdout).context("git output is not valid UTF-8")?;
+    let mut result = HashMap::new();
+
+    for line in stdout.lines() {
+        // Porcelain format: XY <path> or XY <path> -> <renamed-path>
+        if line.len() < 4 {
+            continue;
+        }
+        let status_x = line.as_bytes()[0];
+        let status_y = line.as_bytes()[1];
+
+        // Skip lines that are only deletions with no remaining file
+        let is_deleted = status_x == b'D' || status_y == b'D';
+
+        // Extract path (skip "XY " prefix)
+        let path_str = &line[3..];
+        // Handle renames: "XY old -> new"
+        let path_str = if let Some(arrow_pos) = path_str.find(" -> ") {
+            &path_str[arrow_pos + 4..]
+        } else {
+            path_str
+        };
+
+        let rel_path = PathBuf::from(path_str);
+        let abs_path = root.join(&rel_path);
+
+        let hash = if is_deleted && !abs_path.exists() {
+            [0u8; 32]
+        } else if abs_path.is_file() {
+            let content = std::fs::read(&abs_path)
+                .with_context(|| format!("failed to read dirty file: {}", abs_path.display()))?;
+            let mut hasher = Sha256::new();
+            hasher.update(&content);
+            let result = hasher.finalize();
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&result);
+            hash
+        } else {
+            // Directory or non-existent — skip
+            continue;
+        };
+
+        result.insert(rel_path, hash);
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]

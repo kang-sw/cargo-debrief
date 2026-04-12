@@ -8,6 +8,25 @@ use crate::chunk::Chunk;
 
 const INDEX_VERSION: u32 = 8;
 
+// ---------------------------------------------------------------------------
+// Git state tracking (Phase 1 of 260412-fix-incremental-indexing)
+// ---------------------------------------------------------------------------
+
+/// Snapshot of dirty (modified/untracked) files at index time.
+/// Keys are repo-relative paths (relative to the git root).
+/// Values are sha256 content hashes at the time of indexing.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DirtySnapshot {
+    pub file_hashes: HashMap<PathBuf, [u8; 32]>,
+}
+
+/// Per-git-root state recorded at index time.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GitRepoState {
+    pub last_indexed_commit: String,
+    pub dirty_snapshot: DirtySnapshot,
+}
+
 /// Identifies which embedding backend produced this index.
 /// On load, a mismatch triggers re-indexing to avoid mixing embeddings
 /// from different backends in the same HNSW index.
@@ -31,7 +50,8 @@ pub const fn current_backend() -> BackendTag {
 pub struct IndexData {
     version: u32,
     backend: BackendTag,
-    pub last_indexed_commit: Option<String>,
+    /// Per-git-root state. Key = git root absolute path.
+    pub git_states: HashMap<PathBuf, GitRepoState>,
     pub embedding_model: Option<String>,
     pub chunks: HashMap<PathBuf, Vec<Chunk>>,
 }
@@ -41,7 +61,7 @@ impl IndexData {
         Self {
             version: INDEX_VERSION,
             backend: current_backend(),
-            last_indexed_commit: None,
+            git_states: HashMap::new(),
             embedding_model: None,
             chunks: HashMap::new(),
         }
@@ -110,7 +130,13 @@ mod tests {
         let path = dir.path().join("index.bin");
 
         let mut data = IndexData::new();
-        data.last_indexed_commit = Some("abc123".to_string());
+        data.git_states.insert(
+            PathBuf::from("/repo/root"),
+            GitRepoState {
+                last_indexed_commit: "abc123".to_string(),
+                dirty_snapshot: DirtySnapshot::default(),
+            },
+        );
         data.embedding_model = Some("all-MiniLM-L6-v2".to_string());
         data.chunks.insert(
             PathBuf::from("src/lib.rs"),
@@ -121,7 +147,11 @@ mod tests {
         let loaded = load_index(&path).unwrap().expect("expected Some");
 
         assert_eq!(loaded.version, INDEX_VERSION);
-        assert_eq!(loaded.last_indexed_commit.as_deref(), Some("abc123"));
+        let state = loaded
+            .git_states
+            .get(&PathBuf::from("/repo/root"))
+            .expect("git_states entry should exist");
+        assert_eq!(state.last_indexed_commit, "abc123");
         assert_eq!(loaded.embedding_model.as_deref(), Some("all-MiniLM-L6-v2"));
 
         let chunks = loaded.chunks.get(&PathBuf::from("src/lib.rs")).unwrap();

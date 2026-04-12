@@ -37,6 +37,9 @@ enum Command {
         /// Skip dependency indexing
         #[arg(long)]
         no_deps: bool,
+        /// Rebuild only the specified source root (matches against registered sources)
+        #[arg(long)]
+        source: Option<PathBuf>,
     },
     /// Search indexed code chunks
     Search {
@@ -163,7 +166,10 @@ async fn main() -> Result<()> {
     let service = resolve_service(&project_root);
 
     match cli.command {
-        Command::RebuildIndex { no_deps } => {
+        Command::RebuildIndex { no_deps, source } => {
+            if source.is_some() {
+                todo!("Phase 3: per-source rebuild");
+            }
             let result = service
                 .index(&project_root, &project_root, !no_deps)
                 .await?;

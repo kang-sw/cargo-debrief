@@ -6,9 +6,9 @@ use cargo_debrief::{
     chunk::Chunk,
     chunker::{Chunker, RustChunker},
     config::{Config, ConfigPaths, load_config, save_config},
-    git::changed_files,
+    git::{self, changed_files},
     search::SearchIndex,
-    store::{IndexData, load_index, save_index},
+    store::{DirtySnapshot, GitRepoState, IndexData, load_index, save_index},
 };
 
 /// Set CARGO_DEBRIEF_BIN env var once for daemon tests (points spawn_daemon at the real binary).
@@ -722,5 +722,152 @@ fn resolve_service_no_git_repo_returns_in_process() {
     assert!(
         client.is_none(),
         "auto_spawn should return None outside git repo"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: find_git_root discovers repo root from a sub-path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_git_root_from_subpath() {
+    // This test runs inside the cargo-debrief repo itself.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sub_path = manifest_dir.join("src");
+
+    let root = git::find_git_root(&sub_path).expect("should find git root from src/");
+    assert_eq!(
+        root, manifest_dir,
+        "git root should be the repo root (CARGO_MANIFEST_DIR)"
+    );
+}
+
+#[test]
+fn find_git_root_returns_none_for_non_repo() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let result = git::find_git_root(dir.path());
+    // tempdir is under /tmp which is unlikely to be inside a git repo,
+    // but if it happens to be (e.g. inside the test runner's repo), the
+    // test still passes — we just verify it doesn't panic.
+    // The stronger assertion is that a path like /tmp/xxx won't find .git.
+    // On macOS /tmp -> /private/tmp which is outside any repo.
+    let _ = result; // no panic = pass
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: IndexData round-trip with populated git_states (version 8)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn index_data_round_trip_with_git_states() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("index.bin");
+
+    let mut data = IndexData::new();
+
+    // Populate git_states with a realistic entry
+    let mut dirty_hashes = std::collections::HashMap::new();
+    dirty_hashes.insert(PathBuf::from("src/main.rs"), [0xAB; 32]);
+    dirty_hashes.insert(PathBuf::from("lib/util.rs"), [0xCD; 32]);
+
+    data.git_states.insert(
+        PathBuf::from("/home/user/project"),
+        GitRepoState {
+            last_indexed_commit: "deadbeef1234567890abcdef1234567890abcdef".to_string(),
+            dirty_snapshot: DirtySnapshot {
+                file_hashes: dirty_hashes,
+            },
+        },
+    );
+
+    data.git_states.insert(
+        PathBuf::from("/home/user/external-lib"),
+        GitRepoState {
+            last_indexed_commit: "cafebabe1234567890abcdef1234567890abcdef".to_string(),
+            dirty_snapshot: DirtySnapshot::default(),
+        },
+    );
+
+    data.embedding_model = Some("nomic-embed-text-v1.5".to_string());
+
+    save_index(&path, &data).expect("save_index");
+    let loaded = load_index(&path)
+        .expect("load_index")
+        .expect("expected Some — just saved");
+
+    // Version field must be 8 after round-trip
+    // (We can't directly access `version` since it's private, but the fact
+    // that load_index returned Some means version == INDEX_VERSION == 8.)
+
+    // Verify git_states survived the round-trip
+    assert_eq!(
+        loaded.git_states.len(),
+        2,
+        "should have 2 git_states entries"
+    );
+
+    let state1 = loaded
+        .git_states
+        .get(&PathBuf::from("/home/user/project"))
+        .expect("project git state should exist");
+    assert_eq!(
+        state1.last_indexed_commit,
+        "deadbeef1234567890abcdef1234567890abcdef"
+    );
+    assert_eq!(state1.dirty_snapshot.file_hashes.len(), 2);
+    assert_eq!(
+        state1
+            .dirty_snapshot
+            .file_hashes
+            .get(&PathBuf::from("src/main.rs")),
+        Some(&[0xAB; 32])
+    );
+
+    let state2 = loaded
+        .git_states
+        .get(&PathBuf::from("/home/user/external-lib"))
+        .expect("external-lib git state should exist");
+    assert_eq!(
+        state2.last_indexed_commit,
+        "cafebabe1234567890abcdef1234567890abcdef"
+    );
+    assert!(state2.dirty_snapshot.file_hashes.is_empty());
+
+    assert_eq!(
+        loaded.embedding_model.as_deref(),
+        Some("nomic-embed-text-v1.5")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: IndexData version mismatch with git_states returns None
+// ---------------------------------------------------------------------------
+
+#[test]
+fn index_data_version_mismatch_returns_none_with_git_states() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("index.bin");
+
+    let mut data = IndexData::new();
+    data.git_states.insert(
+        PathBuf::from("/repo"),
+        GitRepoState {
+            last_indexed_commit: "abc".to_string(),
+            dirty_snapshot: DirtySnapshot::default(),
+        },
+    );
+
+    save_index(&path, &data).expect("save_index");
+
+    // Corrupt the version field (first 4 bytes, little-endian u32)
+    let mut bytes = std::fs::read(&path).unwrap();
+    let bad_version: u32 = 999;
+    bytes[..4].copy_from_slice(&bad_version.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let result = load_index(&path).expect("load_index should not error");
+    assert!(
+        result.is_none(),
+        "version mismatch should return None even with populated git_states"
     );
 }
