@@ -265,6 +265,7 @@ async fn run_index_for_sources(
     embedder: &Embedder,
 ) -> Result<IndexData> {
     let _root_span = info_span!("rebuild_index", project = %project_root.display()).entered();
+    let index_start = std::time::Instant::now();
 
     if sources.is_empty() {
         warn!("no sources registered; rebuild produced empty index");
@@ -405,11 +406,39 @@ async fn run_index_for_sources(
             .collect()
     };
 
+    // ---- Progress: discovery summary --------------------------------------
+    {
+        use std::io::Write;
+        eprintln!(
+            "[discovery]  {} files across {} sources",
+            files.len(),
+            project_sources.len()
+        );
+        let _ = std::io::stderr().flush();
+    }
+
     // ---- Chunking ---------------------------------------------------------
+    let total_files = files.len();
+    let is_terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let mut per_file: HashMap<PathBuf, Vec<Chunk>> = HashMap::new();
     {
-        let _span = info_span!("chunking", files = files.len()).entered();
-        for (relative, language) in &files {
+        let _span = info_span!("chunking", files = total_files).entered();
+        for (file_idx, (relative, language)) in files.iter().enumerate() {
+            {
+                use std::io::Write;
+                let label = format!(
+                    "[chunking]   file {}/{}  {}",
+                    file_idx + 1,
+                    total_files,
+                    relative.display()
+                );
+                if is_terminal {
+                    eprint!("\r{label:<80}");
+                } else {
+                    eprintln!("{label}");
+                }
+                let _ = std::io::stderr().flush();
+            }
             let abs = project_root.join(relative);
             let source = match std::fs::read_to_string(&abs) {
                 Ok(s) => s,
@@ -434,6 +463,13 @@ async fn run_index_for_sources(
         }
     }
 
+    // Terminate the chunking \r line on terminals before the embedding phase.
+    if is_terminal && total_files > 0 {
+        use std::io::Write;
+        eprintln!();
+        let _ = std::io::stderr().flush();
+    }
+
     // ---- Embedding --------------------------------------------------------
     let total_chunks: usize = per_file.values().map(|v| v.len()).sum();
     {
@@ -444,12 +480,13 @@ async fn run_index_for_sources(
         let mut chunk_refs: Vec<&mut Chunk> =
             per_file.values_mut().flat_map(|v| v.iter_mut()).collect();
 
+        let total_batches = chunk_refs.len().div_ceil(EMBED_BATCH_SIZE);
+
         if !chunk_refs.is_empty() {
             use std::io::Write;
-            eprint!("indexing");
-            let _ = std::io::stderr().flush();
-
+            let embed_start = std::time::Instant::now();
             let mut start = 0usize;
+            let mut batch_idx = 0usize;
             while start < chunk_refs.len() {
                 let end = (start + EMBED_BATCH_SIZE).min(chunk_refs.len());
                 let texts: Vec<&str> = chunk_refs[start..end]
@@ -460,14 +497,50 @@ async fn run_index_for_sources(
                 for (chunk, emb) in chunk_refs[start..end].iter_mut().zip(embeddings) {
                     chunk.embedding = Some(emb);
                 }
-                eprint!(".");
+                batch_idx += 1;
+                let elapsed = embed_start.elapsed().as_secs_f64();
+                let chunks_done = end;
+                let rate = if elapsed > 0.0 {
+                    chunks_done as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let remaining = total_chunks.saturating_sub(chunks_done);
+                let eta_secs = if rate > 0.0 {
+                    (remaining as f64 / rate) as u64
+                } else {
+                    0
+                };
+                let eta_str = if eta_secs >= 60 {
+                    format!("{}m{:02}s", eta_secs / 60, eta_secs % 60)
+                } else {
+                    format!("{eta_secs}s")
+                };
+                let label = format!(
+                    "[embedding]  batch {batch_idx}/{total_batches}  ({:.0} chunks/s, ETA {eta_str})",
+                    rate
+                );
+                if is_terminal {
+                    eprint!("\r{label:<80}");
+                } else {
+                    eprintln!("{label}");
+                }
                 let _ = std::io::stderr().flush();
                 start = end;
             }
-            eprintln!("\ndone. {total_chunks} chunks, {} files.", files.len());
-        } else {
-            eprintln!("indexing\ndone. 0 chunks, {} files.", files.len());
+            if is_terminal {
+                eprintln!();
+            }
         }
+
+        let total_elapsed = index_start.elapsed();
+        let total_secs = total_elapsed.as_secs();
+        let total_str = if total_secs >= 60 {
+            format!("{}m{:02}s", total_secs / 60, total_secs % 60)
+        } else {
+            format!("{total_secs}s")
+        };
+        eprintln!("done. {total_chunks} chunks, {total_files} files.  total {total_str}");
     }
 
     // ---- Index build ------------------------------------------------------
