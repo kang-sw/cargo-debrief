@@ -265,6 +265,7 @@ async fn run_index_for_sources(
     embedder: &Embedder,
 ) -> Result<IndexData> {
     let _root_span = info_span!("rebuild_index", project = %project_root.display()).entered();
+    let index_start = std::time::Instant::now();
 
     if sources.is_empty() {
         warn!("no sources registered; rebuild produced empty index");
@@ -288,19 +289,23 @@ async fn run_index_for_sources(
     // ---- File discovery ---------------------------------------------------
     // Build (relative_path, language) pairs deduplicated across overlapping
     // source roots. The first source registered wins on a language conflict.
+    //
+    // Per-source strategy:
+    // - External source (abs_root has its own .git, or lies outside project_root):
+    //   use walkdir to enumerate files — git ls-files of the project repo cannot
+    //   see files tracked by a foreign git repo.
+    // - Project source: use git ls-files (existing behavior, single lazy call).
     let files: Vec<(PathBuf, Language)> = {
         let _span = info_span!("file_discovery").entered();
 
         let mut seen: HashMap<PathBuf, Language> = HashMap::new();
         let mut order: Vec<PathBuf> = Vec::new();
 
-        // Single git ls-files call serves every source — Phase 1 is full
-        // rebuild only, so `from = None`.
-        let changes = git::changed_files(project_root, None)?;
-        let all_paths: Vec<PathBuf> = changes.added.iter().map(PathBuf::from).collect();
+        // Lazily populated on first project-source entry.
+        let mut git_paths: Option<Vec<PathBuf>> = None;
 
         for entry in &project_sources {
-            let scoped_root = entry_relative_root(&entry.root);
+            let abs_root = project_root.join(&entry.root);
             let ext_set: HashSet<String> = entry
                 .extensions
                 .as_deref()
@@ -312,21 +317,69 @@ async fn run_index_for_sources(
                         .collect()
                 });
 
-            for rel in &all_paths {
-                if !path_under_root(rel, &scoped_root) {
-                    continue;
-                }
-                let Some(ext) = lowercase_extension(rel) else {
-                    continue;
-                };
-                if !ext_set.contains(&ext) {
-                    continue;
-                }
+            // Determine whether this source root is external to the project's
+            // git repo. Two conditions indicate an external repo:
+            // (a) the root has its own .git directory (a cloned sub-repo), but
+            //     only when abs_root is not project_root itself — the project's
+            //     own .git must not trigger the external branch, or
+            // (b) it lies outside project_root entirely.
+            let is_external = (abs_root != project_root && abs_root.join(".git").exists())
+                || abs_root.strip_prefix(project_root).is_err();
 
-                match seen.get(rel) {
+            let candidate_paths: Vec<PathBuf> = if is_external {
+                // Walk the external root directly.
+                // Stored path is always relative to project_root: form it by
+                // stripping abs_root from the file path, then prepending the
+                // entry.root portion (which is itself project_root-relative for
+                // inside-project sub-roots, or an absolute path for
+                // fully-external roots — in the absolute case the stored key is
+                // also absolute, and `project_root.join(absolute)` on POSIX
+                // resolves to the absolute path, so file reads remain correct).
+                let root_rel: &Path = abs_root
+                    .strip_prefix(project_root)
+                    .unwrap_or(abs_root.as_path());
+                walkdir::WalkDir::new(&abs_root)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter_map(|e| {
+                        let abs_path = e.into_path();
+                        let within_root = abs_path.strip_prefix(&abs_root).ok()?;
+                        let rel = root_rel.join(within_root);
+                        let ext = lowercase_extension(&rel)?;
+                        if ext_set.contains(&ext) {
+                            Some(rel)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                // Project source: use git ls-files (lazily fetched once).
+                let all_paths = git_paths.get_or_insert_with(|| {
+                    git::changed_files(project_root, None)
+                        .map(|c| c.added.iter().map(PathBuf::from).collect())
+                        .unwrap_or_default()
+                });
+                let scoped_root = entry_relative_root(&entry.root);
+                all_paths
+                    .iter()
+                    .filter(|rel| path_under_root(rel, &scoped_root))
+                    .filter(|rel| {
+                        lowercase_extension(rel)
+                            .map(|e| ext_set.contains(&e))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            };
+
+            for rel in candidate_paths {
+                match seen.get(&rel) {
                     None => {
                         seen.insert(rel.clone(), entry.language);
-                        order.push(rel.clone());
+                        order.push(rel);
                     }
                     Some(existing) if *existing == entry.language => {
                         // silent unify — same-language duplicate
@@ -353,11 +406,39 @@ async fn run_index_for_sources(
             .collect()
     };
 
+    // ---- Progress: discovery summary --------------------------------------
+    {
+        use std::io::Write;
+        eprintln!(
+            "[discovery]  {} files across {} sources",
+            files.len(),
+            project_sources.len()
+        );
+        let _ = std::io::stderr().flush();
+    }
+
     // ---- Chunking ---------------------------------------------------------
+    let total_files = files.len();
+    let is_terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let mut per_file: HashMap<PathBuf, Vec<Chunk>> = HashMap::new();
     {
-        let _span = info_span!("chunking", files = files.len()).entered();
-        for (relative, language) in &files {
+        let _span = info_span!("chunking", files = total_files).entered();
+        for (file_idx, (relative, language)) in files.iter().enumerate() {
+            {
+                use std::io::Write;
+                let label = format!(
+                    "[chunking]   file {}/{}  {}",
+                    file_idx + 1,
+                    total_files,
+                    relative.display()
+                );
+                if is_terminal {
+                    eprint!("\r{label:<80}");
+                } else {
+                    eprintln!("{label}");
+                }
+                let _ = std::io::stderr().flush();
+            }
             let abs = project_root.join(relative);
             let source = match std::fs::read_to_string(&abs) {
                 Ok(s) => s,
@@ -382,6 +463,13 @@ async fn run_index_for_sources(
         }
     }
 
+    // Terminate the chunking \r line on terminals before the embedding phase.
+    if is_terminal && total_files > 0 {
+        use std::io::Write;
+        eprintln!();
+        let _ = std::io::stderr().flush();
+    }
+
     // ---- Embedding --------------------------------------------------------
     let total_chunks: usize = per_file.values().map(|v| v.len()).sum();
     {
@@ -392,12 +480,13 @@ async fn run_index_for_sources(
         let mut chunk_refs: Vec<&mut Chunk> =
             per_file.values_mut().flat_map(|v| v.iter_mut()).collect();
 
+        let total_batches = chunk_refs.len().div_ceil(EMBED_BATCH_SIZE);
+
         if !chunk_refs.is_empty() {
             use std::io::Write;
-            eprint!("indexing");
-            let _ = std::io::stderr().flush();
-
+            let embed_start = std::time::Instant::now();
             let mut start = 0usize;
+            let mut batch_idx = 0usize;
             while start < chunk_refs.len() {
                 let end = (start + EMBED_BATCH_SIZE).min(chunk_refs.len());
                 let texts: Vec<&str> = chunk_refs[start..end]
@@ -408,14 +497,50 @@ async fn run_index_for_sources(
                 for (chunk, emb) in chunk_refs[start..end].iter_mut().zip(embeddings) {
                     chunk.embedding = Some(emb);
                 }
-                eprint!(".");
+                batch_idx += 1;
+                let elapsed = embed_start.elapsed().as_secs_f64();
+                let chunks_done = end;
+                let rate = if elapsed > 0.0 {
+                    chunks_done as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let remaining = total_chunks.saturating_sub(chunks_done);
+                let eta_secs = if rate > 0.0 {
+                    (remaining as f64 / rate) as u64
+                } else {
+                    0
+                };
+                let eta_str = if eta_secs >= 60 {
+                    format!("{}m{:02}s", eta_secs / 60, eta_secs % 60)
+                } else {
+                    format!("{eta_secs}s")
+                };
+                let label = format!(
+                    "[embedding]  batch {batch_idx}/{total_batches}  ({:.0} chunks/s, ETA {eta_str})",
+                    rate
+                );
+                if is_terminal {
+                    eprint!("\r{label:<80}");
+                } else {
+                    eprintln!("{label}");
+                }
                 let _ = std::io::stderr().flush();
                 start = end;
             }
-            eprintln!("\ndone. {total_chunks} chunks, {} files.", files.len());
-        } else {
-            eprintln!("indexing\ndone. 0 chunks, {} files.", files.len());
+            if is_terminal {
+                eprintln!();
+            }
         }
+
+        let total_elapsed = index_start.elapsed();
+        let total_secs = total_elapsed.as_secs();
+        let total_str = if total_secs >= 60 {
+            format!("{}m{:02}s", total_secs / 60, total_secs % 60)
+        } else {
+            format!("{total_secs}s")
+        };
+        eprintln!("done. {total_chunks} chunks, {total_files} files.  total {total_str}");
     }
 
     // ---- Index build ------------------------------------------------------

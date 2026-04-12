@@ -570,6 +570,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-cpp",
  "tree-sitter-rust",
+ "walkdir",
  "windows-sys 0.59.0",
 ]
 
