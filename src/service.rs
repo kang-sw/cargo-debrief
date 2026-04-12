@@ -318,14 +318,25 @@ async fn run_index_for_sources(
 
             // Determine whether this source root is external to the project's
             // git repo. Two conditions indicate an external repo:
-            // (a) the root has its own .git directory (a cloned sub-repo), or
+            // (a) the root has its own .git directory (a cloned sub-repo), but
+            //     only when abs_root is not project_root itself — the project's
+            //     own .git must not trigger the external branch, or
             // (b) it lies outside project_root entirely.
-            let is_external =
-                abs_root.join(".git").exists() || abs_root.strip_prefix(project_root).is_err();
+            let is_external = (abs_root != project_root && abs_root.join(".git").exists())
+                || abs_root.strip_prefix(project_root).is_err();
 
             let candidate_paths: Vec<PathBuf> = if is_external {
-                // Walk the external root directly; collect paths relative to
-                // project_root so downstream code stays uniform.
+                // Walk the external root directly.
+                // Stored path is always relative to project_root: form it by
+                // stripping abs_root from the file path, then prepending the
+                // entry.root portion (which is itself project_root-relative for
+                // inside-project sub-roots, or an absolute path for
+                // fully-external roots — in the absolute case the stored key is
+                // also absolute, and `project_root.join(absolute)` on POSIX
+                // resolves to the absolute path, so file reads remain correct).
+                let root_rel: &Path = abs_root
+                    .strip_prefix(project_root)
+                    .unwrap_or(abs_root.as_path());
                 walkdir::WalkDir::new(&abs_root)
                     .follow_links(false)
                     .into_iter()
@@ -333,10 +344,8 @@ async fn run_index_for_sources(
                     .filter(|e| e.file_type().is_file())
                     .filter_map(|e| {
                         let abs_path = e.into_path();
-                        let rel = abs_path
-                            .strip_prefix(project_root)
-                            .unwrap_or(&abs_path)
-                            .to_path_buf();
+                        let within_root = abs_path.strip_prefix(&abs_root).ok()?;
+                        let rel = root_rel.join(within_root);
                         let ext = lowercase_extension(&rel)?;
                         if ext_set.contains(&ext) {
                             Some(rel)
