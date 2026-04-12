@@ -129,6 +129,16 @@ pub trait DebriefService {
         project_root: &Path,
         index: usize,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Force a full re-index of a single source identified by `source_root`.
+    ///
+    /// `source_root` is matched against registered `SourceEntry.root` after
+    /// canonicalizing both sides. Returns an error if no matching entry is found.
+    fn rebuild_source(
+        &self,
+        project_root: &Path,
+        source_root: &Path,
+    ) -> impl Future<Output = Result<IndexResult>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,18 +225,471 @@ fn lowercase_extension(path: &Path) -> Option<String> {
         .map(|s| s.to_ascii_lowercase())
 }
 
-/// Resolve the on-disk index, performing a full rebuild whenever it is
-/// missing or stale.
+/// Convert a git-root-relative path to the chunk key used in `IndexData.chunks`.
 ///
-/// Phase 1 staleness rules (binary; no incremental diffs):
-/// - Missing file → rebuild.
-/// - `embedding_model` differs from `current_model_name` → rebuild.
-/// - `git_states` staleness check (Phase 2 — currently triggers full rebuild on any HEAD change).
-/// - `force_full == true` → rebuild unconditionally.
+/// Chunk keys follow the convention set by `run_index_for_sources`:
+/// - For files within `project_root`, the key is project_root-relative.
+/// - For external files (outside `project_root`), the key is absolute.
+fn git_rel_to_chunk_key(git_root: &Path, git_rel: &Path, project_root: &Path) -> PathBuf {
+    let abs_file = git_root.join(git_rel);
+    abs_file
+        .strip_prefix(project_root)
+        .map(|p| p.to_path_buf())
+        .unwrap_or(abs_file)
+}
+
+/// Chunk and embed a single source file, returning its chunks.
 ///
-/// If `git::head_commit` fails (e.g. empty repo with no HEAD), the
-/// commit field is treated as "always rebuild" and the resulting index
-/// stores an empty `git_states` map.
+/// `file_key` is the path used as the `IndexData.chunks` key (may be relative
+/// or absolute — the chunker receives it for metadata, the embedder text is
+/// language-agnostic). Returns `Ok(vec![])` on read/chunk failure (logged as
+/// warnings to match the batch pipeline).
+fn chunk_file(abs_path: &Path, file_key: &Path, language: Language) -> Vec<Chunk> {
+    let source = match std::fs::read_to_string(abs_path) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(path = %abs_path.display(), error = %e, "incremental: failed to read file");
+            return vec![];
+        }
+    };
+    let chunker = chunker_for(&language);
+    match chunker.chunk(file_key, &source) {
+        Ok(chunks) => chunks,
+        Err(e) => {
+            warn!(path = %abs_path.display(), error = %e, "incremental: chunker failed");
+            vec![]
+        }
+    }
+}
+
+/// Embed a batch of chunks in-place using the given embedder.
+fn embed_chunks(chunks: &mut Vec<Chunk>, embedder: &Embedder) -> Result<()> {
+    let texts: Vec<&str> = chunks.iter().map(|c| c.embedding_text.as_str()).collect();
+    if texts.is_empty() {
+        return Ok(());
+    }
+    let embeddings = embedder.embed_batch(&texts)?;
+    for (chunk, emb) in chunks.iter_mut().zip(embeddings) {
+        chunk.embedding = Some(emb);
+    }
+    Ok(())
+}
+
+/// Stamp `git_states` for every git root reachable from `sources`.
+///
+/// Called after a full rebuild to record current HEAD + empty dirty snapshot
+/// for all git roots. Also removes stale entries whose git root is no longer
+/// referenced by any active source.
+fn stamp_all_git_states(project_root: &Path, sources: &[SourceEntry], data: &mut IndexData) {
+    let mut active_roots: HashSet<PathBuf> = HashSet::new();
+    for entry in sources {
+        let abs_root = project_root.join(&entry.root);
+        if let Some(git_root) = git::find_git_root(&abs_root) {
+            let head = match git::current_head(&git_root) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(root = %git_root.display(), error = %e, "stamp_all_git_states: cannot get HEAD");
+                    continue;
+                }
+            };
+            let dirty = git::dirty_files(&git_root).unwrap_or_default();
+            active_roots.insert(git_root.clone());
+            data.git_states.insert(
+                git_root,
+                store::GitRepoState {
+                    last_indexed_commit: head,
+                    dirty_snapshot: store::DirtySnapshot { file_hashes: dirty },
+                },
+            );
+        }
+    }
+    // Remove stale git_states entries no longer referenced by any source.
+    data.git_states
+        .retain(|root, _| active_roots.contains(root));
+}
+
+/// Apply incremental updates to `data` based on changes in each source's git repo.
+///
+/// Returns `true` when at least one source was patched (caller should save the index).
+/// Returns `false` when every source is fully fresh (caller can return as-is).
+///
+/// For non-git sources: if no chunks exist under the source root, queues a full
+/// walkdir scan of that source. Otherwise, skips (manual-only policy).
+async fn apply_incremental_updates(
+    project_root: &Path,
+    sources: &[SourceEntry],
+    data: &mut IndexData,
+    embedder: &Embedder,
+) -> Result<bool> {
+    let mut any_change = false;
+
+    // Track which git roots we've already processed (a root may be shared by
+    // multiple source entries — process it only once).
+    let mut processed_git_roots: HashSet<PathBuf> = HashSet::new();
+
+    for entry in sources {
+        if entry.dep {
+            continue; // dep sources not indexed in Phase 1
+        }
+
+        let abs_root: PathBuf = if entry.root == Path::new(".") || entry.root.as_os_str().is_empty()
+        {
+            project_root.to_path_buf()
+        } else {
+            project_root.join(&entry.root)
+        };
+
+        let git_root = git::find_git_root(&abs_root);
+
+        if git_root.is_none() {
+            // Non-git source: full scan if no chunks exist under this root, else skip.
+            let has_chunks = data.chunks.keys().any(|k| {
+                let abs_k = project_root.join(k);
+                abs_k.starts_with(&abs_root) || k.starts_with(&abs_root)
+            });
+            if !has_chunks {
+                // Full scan this non-git source.
+                let new_chunks = scan_source_full(project_root, entry, embedder).await?;
+                for (key, chunks) in new_chunks {
+                    data.chunks.insert(key, chunks);
+                }
+                any_change = true;
+            }
+            continue;
+        }
+
+        let git_root = git_root.unwrap();
+
+        if processed_git_roots.contains(&git_root) {
+            continue;
+        }
+        processed_git_roots.insert(git_root.clone());
+
+        let current_head = match git::current_head(&git_root) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(root = %git_root.display(), error = %e, "cannot get HEAD; skipping incremental for this root");
+                continue;
+            }
+        };
+        let current_dirty = git::dirty_files(&git_root).unwrap_or_default();
+
+        let state = data.git_states.get(&git_root);
+
+        // Compute commit-level changes since last indexed commit.
+        let commit_changed = if let Some(s) = state {
+            if s.last_indexed_commit != current_head {
+                match git::changed_files(&git_root, Some(&s.last_indexed_commit)) {
+                    Ok(fc) => fc,
+                    Err(e) => {
+                        warn!(root = %git_root.display(), error = %e,
+                              "git diff failed; falling back to full rebuild for this root");
+                        // Signal a full rebuild for this git root's sources.
+                        for src_entry in sources.iter().filter(|e| {
+                            !e.dep
+                                && git::find_git_root(&project_root.join(&e.root)).as_ref()
+                                    == Some(&git_root)
+                        }) {
+                            let new_chunks =
+                                scan_source_full(project_root, src_entry, embedder).await?;
+                            for (key, chunks) in new_chunks {
+                                data.chunks.insert(key, chunks);
+                            }
+                        }
+                        data.git_states.insert(
+                            git_root.clone(),
+                            store::GitRepoState {
+                                last_indexed_commit: current_head,
+                                dirty_snapshot: store::DirtySnapshot {
+                                    file_hashes: current_dirty,
+                                },
+                            },
+                        );
+                        any_change = true;
+                        continue;
+                    }
+                }
+            } else {
+                git::FileChanges {
+                    added: vec![],
+                    modified: vec![],
+                    deleted: vec![],
+                }
+            }
+        } else {
+            // First time seeing this git root — full scan all sources under it.
+            for src_entry in sources.iter().filter(|e| {
+                !e.dep
+                    && git::find_git_root(&project_root.join(&e.root)).as_ref() == Some(&git_root)
+            }) {
+                let new_chunks = scan_source_full(project_root, src_entry, embedder).await?;
+                for (key, chunks) in new_chunks {
+                    data.chunks.insert(key, chunks);
+                }
+            }
+            data.git_states.insert(
+                git_root.clone(),
+                store::GitRepoState {
+                    last_indexed_commit: current_head,
+                    dirty_snapshot: store::DirtySnapshot {
+                        file_hashes: current_dirty,
+                    },
+                },
+            );
+            any_change = true;
+            continue;
+        };
+
+        // Determine which files changed in the dirty working tree.
+        let empty_state = store::GitRepoState {
+            last_indexed_commit: String::new(),
+            dirty_snapshot: store::DirtySnapshot::default(),
+        };
+        let prev_dirty = state.unwrap_or(&empty_state);
+
+        let mut dirty_changed: HashSet<PathBuf> = HashSet::new();
+        for (path, hash) in &current_dirty {
+            let prev_hash = prev_dirty.dirty_snapshot.file_hashes.get(path);
+            if prev_hash != Some(hash) {
+                dirty_changed.insert(path.clone());
+            }
+        }
+
+        // Files that were dirty last time, are now clean, and are not in commit_changed
+        // have been reverted — re-index them to HEAD version.
+        let commit_all_paths: HashSet<&str> = commit_changed
+            .added
+            .iter()
+            .chain(&commit_changed.modified)
+            .chain(&commit_changed.deleted)
+            .map(|s| s.as_str())
+            .collect();
+
+        let mut reverted: HashSet<PathBuf> = HashSet::new();
+        for path in prev_dirty.dirty_snapshot.file_hashes.keys() {
+            if !current_dirty.contains_key(path)
+                && !commit_all_paths.contains(path.to_str().unwrap_or(""))
+            {
+                reverted.insert(path.clone());
+            }
+        }
+
+        let files_to_reindex: HashSet<PathBuf> = commit_changed
+            .added
+            .iter()
+            .chain(&commit_changed.modified)
+            .map(PathBuf::from)
+            .chain(dirty_changed.into_iter())
+            .chain(reverted.into_iter())
+            .collect();
+
+        let files_to_remove: HashSet<PathBuf> =
+            commit_changed.deleted.iter().map(PathBuf::from).collect();
+
+        if files_to_reindex.is_empty() && files_to_remove.is_empty() {
+            // Nothing changed for this git root; update git_states and continue.
+            data.git_states.insert(
+                git_root,
+                store::GitRepoState {
+                    last_indexed_commit: current_head,
+                    dirty_snapshot: store::DirtySnapshot {
+                        file_hashes: current_dirty,
+                    },
+                },
+            );
+            continue;
+        }
+
+        // Determine language for each affected file by checking source entries.
+        // Build a map: abs_root → (entry_relative_root, language, ext_set) for all
+        // sources under this git root.
+        struct SourceInfo {
+            abs_root: PathBuf,
+            root_rel: PathBuf,
+            language: Language,
+            ext_set: HashSet<String>,
+        }
+        let source_infos: Vec<SourceInfo> = sources
+            .iter()
+            .filter(|e| {
+                !e.dep
+                    && git::find_git_root(&project_root.join(&e.root)).as_ref() == Some(&git_root)
+            })
+            .map(|e| {
+                let ar: PathBuf = if e.root == Path::new(".") || e.root.as_os_str().is_empty() {
+                    project_root.to_path_buf()
+                } else {
+                    project_root.join(&e.root)
+                };
+                let rr = entry_relative_root(&e.root);
+                let ext_set: HashSet<String> = e
+                    .extensions
+                    .as_deref()
+                    .map(|exts| exts.iter().map(|ex| ex.to_ascii_lowercase()).collect())
+                    .unwrap_or_else(|| {
+                        default_extensions(e.language)
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
+                    });
+                SourceInfo {
+                    abs_root: ar,
+                    root_rel: rr,
+                    language: e.language,
+                    ext_set,
+                }
+            })
+            .collect();
+
+        // Remove chunks for deleted files.
+        for rel_path in &files_to_remove {
+            let chunk_key = git_rel_to_chunk_key(&git_root, rel_path, project_root);
+            data.chunks.remove(&chunk_key);
+        }
+
+        // Re-chunk and re-embed files to reindex.
+        for rel_path in &files_to_reindex {
+            let abs_file = git_root.join(rel_path);
+            // Find the source info that owns this file.
+            let info = source_infos.iter().find(|si| {
+                abs_file.starts_with(&si.abs_root)
+                    && lowercase_extension(&abs_file)
+                        .map(|e| si.ext_set.contains(&e))
+                        .unwrap_or(false)
+            });
+            let info = match info {
+                Some(i) => i,
+                None => continue, // file not in any indexed source or wrong extension
+            };
+
+            // Compute chunk key: root_rel + file_within_abs_root
+            let within_abs_root = abs_file
+                .strip_prefix(&info.abs_root)
+                .unwrap_or(rel_path.as_path());
+            let chunk_key = info.root_rel.join(within_abs_root);
+
+            let mut chunks = chunk_file(&abs_file, &chunk_key, info.language);
+            if let Err(e) = embed_chunks(&mut chunks, embedder) {
+                warn!(path = %abs_file.display(), error = %e, "incremental: embedding failed");
+                continue;
+            }
+            if chunks.is_empty() {
+                data.chunks.remove(&chunk_key);
+            } else {
+                data.chunks.insert(chunk_key, chunks);
+            }
+        }
+
+        // Update git_states for this root.
+        data.git_states.insert(
+            git_root,
+            store::GitRepoState {
+                last_indexed_commit: current_head,
+                dirty_snapshot: store::DirtySnapshot {
+                    file_hashes: current_dirty,
+                },
+            },
+        );
+        any_change = true;
+    }
+
+    Ok(any_change)
+}
+
+/// Perform a full walkdir/ls-files scan of a single `SourceEntry`, returning
+/// chunk key → chunks pairs ready for insertion into `IndexData.chunks`.
+///
+/// Used by incremental update (first-time source or git-diff fallback) and
+/// Phase 3 per-source rebuild.
+async fn scan_source_full(
+    project_root: &Path,
+    entry: &SourceEntry,
+    embedder: &Embedder,
+) -> Result<HashMap<PathBuf, Vec<Chunk>>> {
+    let abs_root: PathBuf = if entry.root == Path::new(".") || entry.root.as_os_str().is_empty() {
+        project_root.to_path_buf()
+    } else {
+        project_root.join(&entry.root)
+    };
+    let root_rel = entry_relative_root(&entry.root);
+
+    let ext_set: HashSet<String> = entry
+        .extensions
+        .as_deref()
+        .map(|exts| exts.iter().map(|e| e.to_ascii_lowercase()).collect())
+        .unwrap_or_else(|| {
+            default_extensions(entry.language)
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        });
+
+    let is_external = (abs_root != project_root && abs_root.join(".git").exists())
+        || abs_root.strip_prefix(project_root).is_err();
+
+    let candidate_keys: Vec<PathBuf> = if is_external {
+        walkdir::WalkDir::new(&abs_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| {
+                let abs_path = e.into_path();
+                let within_root = abs_path.strip_prefix(&abs_root).ok()?;
+                let rel = root_rel.join(within_root);
+                let ext = lowercase_extension(&rel)?;
+                if ext_set.contains(&ext) {
+                    Some(rel)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        let all_paths = git::changed_files(project_root, None)
+            .map(|c| c.added.iter().map(PathBuf::from).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let scoped_root = entry_relative_root(&entry.root);
+        all_paths
+            .into_iter()
+            .filter(|rel| path_under_root(rel, &scoped_root))
+            .filter(|rel| {
+                lowercase_extension(rel)
+                    .map(|e| ext_set.contains(&e))
+                    .unwrap_or(false)
+            })
+            .collect()
+    };
+
+    let mut result: HashMap<PathBuf, Vec<Chunk>> = HashMap::new();
+    for key in candidate_keys {
+        let abs_file = project_root.join(&key);
+        let abs_file = if abs_file.is_absolute() && abs_file.exists() {
+            abs_file
+        } else {
+            // For external absolute keys the join is a no-op (POSIX: absolute component).
+            project_root.join(&key)
+        };
+        let mut chunks = chunk_file(&abs_file, &key, entry.language);
+        if chunks.is_empty() {
+            continue;
+        }
+        if let Err(e) = embed_chunks(&mut chunks, embedder) {
+            warn!(path = %abs_file.display(), error = %e, "scan_source_full: embedding failed");
+            continue;
+        }
+        result.insert(key, chunks);
+    }
+    Ok(result)
+}
+
+/// Resolve the on-disk index, performing a full rebuild or incremental update.
+///
+/// Staleness rules (in priority order):
+/// - `force_full == true` → full rebuild unconditionally.
+/// - Missing file or version/backend mismatch → full rebuild (handled by `load_index`).
+/// - `embedding_model` differs from `current_model_name` → full rebuild.
+/// - Otherwise: apply per-git-root incremental staleness check (Phase 2).
 async fn load_or_rebuild_index(
     project_root: &Path,
     embedder: &Embedder,
@@ -234,46 +697,32 @@ async fn load_or_rebuild_index(
     force_full: bool,
 ) -> Result<IndexData> {
     let path = index_path(project_root)?;
-    let head = git::head_commit(project_root).ok();
 
     if !force_full {
-        if let Some(existing) = store::load_index(&path)? {
+        if let Some(mut existing) = store::load_index(&path)? {
             if existing.embedding_model.as_deref() == Some(model_name) {
-                // TODO(Phase 2): wire incremental staleness check per git root.
-                // For now, check the project root's git state as a simple binary gate.
-                if let Some(head_hash) = head.as_deref() {
-                    let project_git_root = git::find_git_root(project_root);
-                    let is_fresh = project_git_root.as_ref().is_some_and(|root| {
-                        existing
-                            .git_states
-                            .get(root)
-                            .is_some_and(|s| s.last_indexed_commit == head_hash)
-                    });
-                    if is_fresh {
-                        return Ok(existing);
-                    }
+                let sources = config::resolve_sources(project_root)?;
+                let changed =
+                    apply_incremental_updates(project_root, &sources, &mut existing, embedder)
+                        .await?;
+
+                // Rebuild HNSW hint: callers rebuild from full data.chunks on each search,
+                // so no separate rebuild step is needed here. Just persist if changed.
+                if changed {
+                    existing.embedding_model = Some(model_name.to_string());
+                    store::save_index(&path, &existing)?;
                 }
-                // todo!("Phase 2: wire incremental staleness check")
-                // Fallthrough to full rebuild for now.
+                return Ok(existing);
             }
         }
     }
 
+    // Full rebuild.
     let sources = config::resolve_sources(project_root)?;
     let mut data = run_index_for_sources(project_root, &sources, embedder).await?;
 
-    // Stamp git_states: record current HEAD for the project git root.
-    if let Some(head_hash) = head {
-        if let Some(git_root) = git::find_git_root(project_root) {
-            data.git_states.insert(
-                git_root,
-                store::GitRepoState {
-                    last_indexed_commit: head_hash,
-                    dirty_snapshot: store::DirtySnapshot::default(),
-                },
-            );
-        }
-    }
+    // Stamp git_states for all sources.
+    stamp_all_git_states(project_root, &sources, &mut data);
     data.embedding_model = Some(model_name.to_string());
     store::save_index(&path, &data)?;
     Ok(data)
@@ -748,6 +1197,99 @@ impl DebriefService for InProcessService {
     async fn remove_source(&self, project_root: &Path, index: usize) -> Result<()> {
         config::remove_source_at(project_root, index)
     }
+
+    async fn rebuild_source(&self, project_root: &Path, source_root: &Path) -> Result<IndexResult> {
+        // Canonicalize the requested path for comparison.
+        let canon_request = source_root
+            .canonicalize()
+            .unwrap_or_else(|_| source_root.to_path_buf());
+
+        let sources = config::resolve_sources(project_root)?;
+
+        // Find the matching SourceEntry by canonicalizing both sides.
+        let entry = sources
+            .iter()
+            .find(|e| {
+                let abs = project_root.join(&e.root);
+                let canon = abs.canonicalize().unwrap_or(abs);
+                canon == canon_request
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no registered source matches {:?}; run `sources` to list registered sources",
+                    source_root
+                )
+            })?
+            .clone();
+
+        let (embedder, model_name) = build_embedder(project_root).await?;
+        let index_path = index_path(project_root)?;
+
+        // Load existing index or start fresh.
+        let mut data = store::load_index(&index_path)?
+            .filter(|d| d.embedding_model.as_deref() == Some(&model_name))
+            .unwrap_or_else(IndexData::new);
+
+        // Clear all existing chunks under this source root.
+        let abs_root: PathBuf = if entry.root == Path::new(".") || entry.root.as_os_str().is_empty()
+        {
+            project_root.to_path_buf()
+        } else {
+            project_root.join(&entry.root)
+        };
+        let root_rel = entry_relative_root(&entry.root);
+
+        // Determine keys to remove: both project-relative and absolute-prefix matches.
+        let keys_to_remove: Vec<PathBuf> = data
+            .chunks
+            .keys()
+            .filter(|k| {
+                // Absolute key: starts_with abs_root
+                // Relative key: starts_with root_rel (non-empty) or abs_root relative to project_root
+                let abs_k = if k.is_absolute() {
+                    k.to_path_buf()
+                } else {
+                    project_root.join(k)
+                };
+                abs_k.starts_with(&abs_root)
+                    || (!root_rel.as_os_str().is_empty() && k.starts_with(&root_rel))
+            })
+            .cloned()
+            .collect();
+        for key in &keys_to_remove {
+            data.chunks.remove(key);
+        }
+
+        // Full re-scan of this source.
+        let new_chunks = scan_source_full(project_root, &entry, &embedder).await?;
+        let files_indexed = new_chunks.len();
+        let chunks_created: usize = new_chunks.values().map(|v| v.len()).sum();
+        for (key, chunks) in new_chunks {
+            data.chunks.insert(key, chunks);
+        }
+
+        // Update git_states for this source's git root.
+        if let Some(git_root) = git::find_git_root(&abs_root) {
+            if let Ok(head) = git::current_head(&git_root) {
+                let dirty = git::dirty_files(&git_root).unwrap_or_default();
+                data.git_states.insert(
+                    git_root,
+                    store::GitRepoState {
+                        last_indexed_commit: head,
+                        dirty_snapshot: store::DirtySnapshot { file_hashes: dirty },
+                    },
+                );
+            }
+        }
+
+        data.embedding_model = Some(model_name);
+        store::save_index(&index_path, &data)?;
+
+        Ok(IndexResult {
+            files_indexed,
+            chunks_created,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -896,6 +1438,16 @@ impl DebriefService for DaemonClient {
     async fn remove_source(&self, _project_root: &Path, _index: usize) -> Result<()> {
         anyhow::bail!("daemon dispatch for remove_source not implemented in Phase 1")
     }
+
+    async fn rebuild_source(
+        &self,
+        _project_root: &Path,
+        _source_root: &Path,
+    ) -> Result<IndexResult> {
+        anyhow::bail!(
+            "daemon dispatch for rebuild_source not implemented; falling back to in-process"
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,5 +1581,17 @@ impl DebriefService for Service {
             }
         }
         self.in_process.remove_source(project_root, index).await
+    }
+
+    async fn rebuild_source(&self, project_root: &Path, source_root: &Path) -> Result<IndexResult> {
+        if let Some(d) = &self.daemon {
+            match d.rebuild_source(project_root, source_root).await {
+                Ok(r) => return Ok(r),
+                Err(e) => eprintln!("[daemon] error, falling back to in-process: {e}"),
+            }
+        }
+        self.in_process
+            .rebuild_source(project_root, source_root)
+            .await
     }
 }

@@ -167,16 +167,21 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::RebuildIndex { no_deps, source } => {
-            if source.is_some() {
-                todo!("Phase 3: per-source rebuild");
+            if let Some(source_path) = source {
+                let result = service.rebuild_source(&project_root, &source_path).await?;
+                println!(
+                    "Re-indexed source {:?}: {} files, {} chunks created.",
+                    source_path, result.files_indexed, result.chunks_created
+                );
+            } else {
+                let result = service
+                    .index(&project_root, &project_root, !no_deps)
+                    .await?;
+                println!(
+                    "Indexed {} files, {} chunks created.",
+                    result.files_indexed, result.chunks_created
+                );
             }
-            let result = service
-                .index(&project_root, &project_root, !no_deps)
-                .await?;
-            println!(
-                "Indexed {} files, {} chunks created.",
-                result.files_indexed, result.chunks_created
-            );
         }
         Command::Search {
             query,
